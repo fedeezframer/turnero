@@ -1,0 +1,15 @@
+{
+  "name": "api-turnos-framer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node api/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "google-spreadsheet": "^4.1.4",
+    "google-auth-library": "^9.6.3",
+    "nodemailer": "^6.9.1"
+  }
+}
