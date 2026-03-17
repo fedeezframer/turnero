@@ -1,9 +1,11 @@
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
+// Configuración de autenticación con Google
 const getAuth = () => new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    // Corregimos el formato de la clave privada
+    key: process.env.GOOGLE_PRIVATE_KEY ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n") : "",
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
@@ -11,8 +13,10 @@ export async function getOccupiedSlots() {
     try {
         const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, getAuth());
         await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
+        const sheet = doc.sheetsByIndex[0]; // Primera pestaña
         const rows = await sheet.getRows();
+        
+        // Retornamos solo la columna "turno"
         return rows.map(row => row.get("turno")).filter(Boolean);
     } catch (e) {
         console.error("Error leyendo Sheets:", e.message);
@@ -26,11 +30,11 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // Mapeo exacto a las columnas de tu imagen
+        // Mapeo EXACTO a las columnas de tu Google Sheet (name, phone, turno)
         await sheet.addRow({
-            name: data.name || "N/A",
-            phone: data.phone || "N/A",
-            turno: data.turno || "N/A",
+            name: data.name,
+            phone: data.phone,
+            turno: data.turno,
             semana: new Date().toLocaleDateString("es-AR")
         });
         return true;
