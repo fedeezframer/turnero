@@ -5,7 +5,6 @@ import nodemailer from "nodemailer";
 
 const app = express();
 
-// Configuración de CORS abierta para evitar bloqueos desde Framer
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -14,22 +13,20 @@ app.use(cors({
 
 app.use(express.json());
 
-// CONFIGURACIÓN DE CORREO (Corregida para evitar ETIMEDOUT)
+// CONFIGURACIÓN DE CORREO REFORZADA
 const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
-    port: 465, 
-    secure: true, // true para puerto 465
+    port: 465, // Puerto SSL (más seguro para Render)
+    secure: true, 
     auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
+        pass: process.env.EMAIL_PASS, // DEBE SER CONTRASEÑA DE APLICACIÓN
     },
     tls: {
-        rejectUnauthorized: false // Ayuda a conectar desde servidores externos como Render
-    },
-    connectionTimeout: 10000, // 10 segundos de espera
+        rejectUnauthorized: false
+    }
 });
 
-// 1. RUTA DE CONSULTA (Para bloquear turnos en Framer)
 app.get("/check-availability", async (req, res) => {
     try {
         const ocupados = await getOccupiedSlots();
@@ -39,19 +36,12 @@ app.get("/check-availability", async (req, res) => {
     }
 });
 
-// 2. RUTA DE RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, email, fecha, hora } = req.body;
         const turnoString = `${fecha} - ${hora}`;
 
-        // Verificar disponibilidad de último momento
-        const ocupados = await getOccupiedSlots();
-        if (ocupados.includes(turnoString)) {
-            return res.status(400).json({ status: "error", message: "Este turno se acaba de ocupar." });
-        }
-
-        // Guardar en Google Sheets
+        // 1. Guardar en Sheets (Ya confirmaste que esto funciona)
         const success = await saveToSheets({ 
             name: name || "Sin nombre", 
             phone: phone || "N/A", 
@@ -60,22 +50,23 @@ app.post("/create-booking", async (req, res) => {
         });
 
         if (success) {
-            // Enviamos el mail (usamos try/catch para que si falla el mail, no se cancele la reserva)
+            // 2. Intentar mandar el mail
             try {
-                const mailOptions = {
+                await transporter.sendMail({
                     from: process.env.EMAIL_USER,
-                    to: process.env.EMAIL_USER,
-                    subject: `📌 Nuevo Turno: ${name}`,
-                    text: `Nuevo turno agendado:\n\nCliente: ${name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email}`
-                };
-                await transporter.sendMail(mailOptions);
+                    to: process.env.EMAIL_USER, // Te llega a vos
+                    subject: `📌 NUEVO TURNO: ${name}`,
+                    text: `Nuevo turno agendado:\n\nCliente: ${name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email || "N/A"}`
+                });
+                console.log("Mail enviado con éxito");
             } catch (mailError) {
-                console.error("Error enviando mail (pero la reserva se guardó):", mailError.message);
+                // Si el mail falla, logueamos el error exacto en Render pero no cortamos el proceso
+                console.error("ERROR DETALLADO DE MAIL:", mailError);
             }
 
             res.json({ status: "success", message: "Reserva confirmada" });
         } else {
-            throw new Error("No se pudo guardar en la planilla de Google.");
+            throw new Error("Error al guardar en Sheets");
         }
     } catch (e) {
         console.error("Error en el servidor:", e);
@@ -83,8 +74,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// ESCUCHA DE PUERTO (Unificado)
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Servidor funcionando en puerto ${PORT}`);
+    console.log(`🚀 API activa en puerto ${PORT}`);
 });
