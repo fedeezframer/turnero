@@ -5,7 +5,6 @@ import nodemailer from "nodemailer";
 
 const app = express();
 
-// Configuración de CORS para que Framer pueda hablar con Render
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST'],
@@ -35,7 +34,7 @@ app.get("/check-availability", async (req, res) => {
 // 2. RUTA DE RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
-        const { name, last_name, phone, email, fecha, hora } = req.body;
+        const { name, phone, email, fecha, hora } = req.body;
         const turnoString = `${fecha} - ${hora}`;
 
         const ocupados = await getOccupiedSlots();
@@ -43,11 +42,11 @@ app.post("/create-booking", async (req, res) => {
             return res.status(400).json({ status: "error", message: "Turno ya ocupado" });
         }
 
+        // IMPORTANTE: Aquí mapeamos lo que llega de Framer a lo que espera Sheets
         const success = await saveToSheets({ 
-            name, 
-            last_name, 
-            phone, 
-            email, 
+            name: name, 
+            phone: phone, 
+            email: email, 
             turno: turnoString 
         });
 
@@ -55,12 +54,11 @@ app.post("/create-booking", async (req, res) => {
             const mailOptions = {
                 from: process.env.EMAIL_USER,
                 to: process.env.EMAIL_USER,
-                subject: `📌 Nuevo Turno: ${name} ${last_name}`,
-                text: `Nuevo turno agendado:\n\nCliente: ${name} ${last_name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email}`
+                subject: `📌 Nuevo Turno: ${name}`,
+                text: `Nuevo turno agendado:\n\nCliente: ${name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email}`
             };
             await transporter.sendMail(mailOptions);
 
-            // Respondemos con status: "success" para el componente de Framer
             res.json({ status: "success", message: "Reserva confirmada" });
         } else {
             throw new Error("Error al guardar en Sheets");
@@ -71,7 +69,8 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
+// CORRECCIÓN: Un solo listen al final
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API activa en puerto ${PORT}`));
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API de Turnos activa en puerto ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 API activa en puerto ${PORT}`);
+});
