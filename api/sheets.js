@@ -26,18 +26,17 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
+        // Usamos EXACTAMENTE los nombres de las columnas de tu foto
         await sheet.addRow({
-            fecha_registro: new Date().toLocaleString("es-AR"),
-            nombre: data.name,
-            apellido: data.last_name,
-            telefono: data.phone,
-            email: data.email,
-            turno: data.turno,
-            estado: "CONFIRMADO"
+            name: data.name,           // Antes decía 'nombre'
+            phone: data.phone,         // Antes decía 'telefono'
+            turno: data.turno,         // Este sí funcionaba
+            semana: new Date().toLocaleDateString("es-AR", { week: "numeric" }) 
         });
         return true;
     } catch (e) {
         console.error("Error al escribir en Sheets:", e.message);
         return false;
     }
+}
 }
