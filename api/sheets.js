@@ -13,10 +13,9 @@ export async function getOccupiedSlots() {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
-        
-        // Leemos solo la columna 'turno'
         return rows.map(row => row.get("turno")).filter(Boolean);
     } catch (e) {
+        console.error("Error leyendo Sheets:", e.message);
         return [];
     }
 }
@@ -27,19 +26,18 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // Columnas limpias para tu Sheets
         await sheet.addRow({
             fecha_registro: new Date().toLocaleString("es-AR"),
             nombre: data.name,
             apellido: data.last_name,
             telefono: data.phone,
             email: data.email,
-            turno: data.turno, // El "27 - 17:00"
+            turno: data.turno,
             estado: "CONFIRMADO"
         });
         return true;
     } catch (e) {
-        console.error("Error Sheets:", e.message);
+        console.error("Error al escribir en Sheets:", e.message);
         return false;
     }
 }
