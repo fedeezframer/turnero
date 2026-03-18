@@ -1,49 +1,72 @@
-import { GoogleSpreadsheet } from "google-spreadsheet";
-import { JWT } from "google-auth-library";
+import express from "express";
+import cors from "cors";
+import { saveToSheets, getOccupiedSlots, getFullData } from "./sheets.js"; // Sumamos getFullData
 
-const getAuth = () => new JWT({
-    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: process.env.GOOGLE_PRIVATE_KEY ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n") : "",
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+const app = express();
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
+app.use(express.json());
+
+app.get("/check-availability", async (req, res) => {
+    try {
+        const { fecha } = req.query; 
+        const ocupadosDelExcel = await getOccupiedSlots();
+        const nowBA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+        const hoyBA = nowBA.getDate().toString();
+        const horaActual = nowBA.getHours();
+        const minActual = nowBA.getMinutes();
+
+        let bloqueados = [...ocupadosDelExcel];
+
+        if (fecha === hoyBA) {
+            for (let h = 0; h <= horaActual; h++) {
+                if (h < horaActual) {
+                    bloqueados.push(`${fecha} - ${h}:00`, `${fecha} - ${h}:30`);
+                }
+                if (h === horaActual) {
+                    bloqueados.push(`${fecha} - ${h}:00`);
+                    if (minActual >= 30) bloqueados.push(`${fecha} - ${h}:30`);
+                }
+            }
+        }
+        res.json({ ocupados: bloqueados });
+    } catch (e) {
+        res.status(500).json({ error: "Error de consulta" });
+    }
 });
 
-export async function getFullData() {
+app.post("/create-booking", async (req, res) => {
     try {
-        const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, getAuth());
-        await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
-        const rows = await sheet.getRows();
-        // Devolvemos objetos completos: { turno, phone, name }
-        return rows.map(row => ({
-            turno: row.get("turno"),
-            phone: row.get("phone"),
-            name: row.get("name")
-        }));
-    } catch (e) {
-        console.error("Error leyendo Sheets:", e.message);
-        return [];
-    }
-}
+        const { name, phone, email, fecha, hora } = req.body;
+        
+        // --- VALIDACIÓN ANTI-DUPLICADOS ---
+        const rows = await getFullData();
+        const yaTieneTurno = rows.some(row => row.phone === phone);
 
-// Mantenemos esta para compatibilidad o la simplificamos
-export async function getOccupiedSlots() {
-    const data = await getFullData();
-    return data.map(d => d.turno).filter(Boolean);
-}
+        if (yaTieneTurno) {
+            return res.status(400).json({ 
+                status: "error", 
+                message: "Ya tenés un turno reservado. No podés sacar otro." 
+            });
+        }
+        // ----------------------------------
 
-export async function saveToSheets(data) {
-    try {
-        const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, getAuth());
-        await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
-        await sheet.addRow({
-            name: data.name,
-            phone: data.phone,
-            turno: data.turno,
-            semana: new Date().toLocaleDateString("es-AR")
+        const turnoString = `${fecha} - ${hora}`;
+        const success = await saveToSheets({ 
+            name: name || "Sin nombre", 
+            phone: phone || "N/A", 
+            email: email || "N/A", 
+            turno: turnoString 
         });
-        return true;
+
+        if (success) {
+            res.json({ status: "success", message: "Reserva confirmada" });
+        } else {
+            res.status(500).json({ status: "error", message: "Error al guardar en la base de datos" });
+        }
     } catch (e) {
-        return false;
+        res.status(500).json({ status: "error", error: e.message });
     }
-}
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API activa en puerto ${PORT}`));
