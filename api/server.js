@@ -13,20 +13,23 @@ app.use(cors({
 
 app.use(express.json());
 
-// CONFIGURACIÓN DE CORREO REFORZADA
+// CONFIGURACIÓN DE CORREO REFORZADA (Puerto 587 con STARTTLS)
 const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
-    port: 465, // Puerto SSL (más seguro para Render)
-    secure: true, 
+    port: 587,
+    secure: false, // false para usar STARTTLS
     auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS, // DEBE SER CONTRASEÑA DE APLICACIÓN
+        pass: process.env.EMAIL_PASS,
     },
     tls: {
         rejectUnauthorized: false
-    }
+    },
+    connectionTimeout: 20000, // 20 segundos
+    socketTimeout: 20000
 });
 
+// 1. RUTA DE CONSULTA
 app.get("/check-availability", async (req, res) => {
     try {
         const ocupados = await getOccupiedSlots();
@@ -36,12 +39,13 @@ app.get("/check-availability", async (req, res) => {
     }
 });
 
+// 2. RUTA DE RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, email, fecha, hora } = req.body;
         const turnoString = `${fecha} - ${hora}`;
 
-        // 1. Guardar en Sheets (Ya confirmaste que esto funciona)
+        // Guardar en Google Sheets (Esto ya funciona)
         const success = await saveToSheets({ 
             name: name || "Sin nombre", 
             phone: phone || "N/A", 
@@ -50,19 +54,14 @@ app.post("/create-booking", async (req, res) => {
         });
 
         if (success) {
-            // 2. Intentar mandar el mail
-            try {
-                await transporter.sendMail({
-                    from: process.env.EMAIL_USER,
-                    to: process.env.EMAIL_USER, // Te llega a vos
-                    subject: `📌 NUEVO TURNO: ${name}`,
-                    text: `Nuevo turno agendado:\n\nCliente: ${name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email || "N/A"}`
-                });
-                console.log("Mail enviado con éxito");
-            } catch (mailError) {
-                // Si el mail falla, logueamos el error exacto en Render pero no cortamos el proceso
-                console.error("ERROR DETALLADO DE MAIL:", mailError);
-            }
+            // ENVIAR AVISO (Si falla el mail, no rompemos la respuesta)
+            transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: process.env.EMAIL_USER,
+                subject: `📌 NUEVO TURNO: ${name}`,
+                text: `¡Hola! Tenés un nuevo turno:\n\nCliente: ${name}\nFecha/Hora: ${turnoString}\nTeléfono: ${phone}\nEmail: ${email || "No cargado"}`
+            }).then(() => console.log("✅ Mail enviado correctamente"))
+              .catch(err => console.error("❌ Falló el mail pero se guardó en Sheets:", err.message));
 
             res.json({ status: "success", message: "Reserva confirmada" });
         } else {
