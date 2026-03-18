@@ -7,17 +7,28 @@ const getAuth = () => new JWT({
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-export async function getOccupiedSlots() {
+export async function getFullData() {
     try {
         const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, getAuth());
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
-        return rows.map(row => row.get("turno")).filter(Boolean);
+        // Devolvemos objetos completos: { turno, phone, name }
+        return rows.map(row => ({
+            turno: row.get("turno"),
+            phone: row.get("phone"),
+            name: row.get("name")
+        }));
     } catch (e) {
         console.error("Error leyendo Sheets:", e.message);
         return [];
     }
+}
+
+// Mantenemos esta para compatibilidad o la simplificamos
+export async function getOccupiedSlots() {
+    const data = await getFullData();
+    return data.map(d => d.turno).filter(Boolean);
 }
 
 export async function saveToSheets(data) {
@@ -25,8 +36,6 @@ export async function saveToSheets(data) {
         const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, getAuth());
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
-
-        // Mapeo exacto a las columnas: name, phone, turno, semana
         await sheet.addRow({
             name: data.name,
             phone: data.phone,
@@ -35,7 +44,6 @@ export async function saveToSheets(data) {
         });
         return true;
     } catch (e) {
-        console.error("Error al escribir en Sheets:", e.message);
         return false;
     }
 }
