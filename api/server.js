@@ -76,13 +76,11 @@ app.post("/admin-login", async (req, res) => {
     }
 });
 
-// --- RUTA DE ESTADÍSTICAS ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const { slug } = req.params;
-    console.log("Cargando stats para:", slug);
+    console.log("Calculando estadísticas para:", slug);
 
     try {
-        // Traemos los datos del usuario por su slug
         const { data: user, error } = await supabase
             .from('usuarios')
             .select('*')
@@ -94,31 +92,39 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
-            range: "Hoja 1!A:E",
+            range: "Hoja 1!A:E", // Traemos de la A a la E
         });
 
         const rows = response.data.values || [];
-        const dataRows = rows.slice(1); // Quitamos encabezados
+        const dataRows = rows.slice(1); // Sacamos el encabezado (name, phone, etc)
+
+        // OBTENER FECHA DE HOY EXACTA (Formato DD/M/YYYY como en tu foto)
+        // Nota: Tu tabla tiene 18/3/2026 (sin el 0 en el mes). 
+        const date = new Date();
+        const hoy = `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}`;
         
-        // Fecha actual en formato DD/MM para comparar con tu Sheets
-        const hoy = new Date().toLocaleString("es-AR", {
-            timeZone: "America/Argentina/Buenos_Aires", 
-            day: '2-digit', 
-            month: '2-digit'
+        console.log("Buscando turnos para fecha:", hoy);
+
+        // FILTRAMOS:
+        // r[3] es la columna D (semana)
+        const turnosDeHoy = dataRows.filter(r => {
+            const fechaFila = r[3] ? r[3].trim() : "";
+            return fechaFila === hoy;
         });
 
         res.json({
             stats: {
-                turnosHoy: dataRows.filter(r => r[2] && r[2].includes(hoy)).length, // Columna C/D según tu sheets.js
-                turnosMensuales: dataRows.length,
+                turnosHoy: turnosDeHoy.length,
+                turnosMensuales: dataRows.length, // Total de la lista por ahora
                 totalTurnos: dataRows.length,
-                ingresosEstimados: dataRows.length * (user.precio || 10000),
+                ingresosEstimados: turnosDeHoy.length * (user.precio || 10000),
                 nombreNegocio: user.business_name || user.slug
             }
         });
+
     } catch (e) {
-        console.error("❌ Error Stats:", e.message);
-        res.status(500).json({ error: "No se pudieron cargar las estadísticas" });
+        console.error("❌ Error en Stats:", e.message);
+        res.status(500).json({ error: e.message });
     }
 });
 
