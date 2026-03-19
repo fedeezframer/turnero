@@ -4,60 +4,66 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 
 const app = express();
-
-// Configuración de CORS ultra-permisiva para que Framer no bloquee nada
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient('https://xyhuzdtpjlmtadqamywu.supabase.co', process.env.SUPABASE_KEY);
 
+// --- HELPER GOOGLE SHEETS ---
+async function getSheets(sheetId) {
+    const auth = new google.auth.GoogleAuth({
+        credentials: {
+            client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        },
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const client = await auth.getClient();
+    return google.sheets({ version: "v4", auth: client });
+}
+
+// --- LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
-    
-    // ESTO VA A APARECER EN LOS LOGS DE RENDER
-    console.log("--- INTENTO DE LOGIN ---");
-    console.log("Usuario recibido:", user);
-    console.log("Clave recibida:", pass);
-
-    if (!supabaseKey) {
-        console.error("❌ ERROR: No hay SUPABASE_KEY en Render");
-        return res.status(500).json({ status: "error", message: "Error de configuración en servidor" });
-    }
-
     try {
-        const { data: dbUser, error } = await supabase
-            .from('usuarios')
-            .select('*')
-            .eq('email', user.trim().toLowerCase())
-            .single();
-
-        if (error) {
-            console.error("❌ Error de Supabase:", error.message);
-            return res.status(401).json({ status: "error", message: "Usuario no encontrado" });
-        }
+        const { data: dbUser } = await supabase.from('usuarios')
+            .select('*').eq('email', user.trim().toLowerCase()).single();
 
         if (dbUser && dbUser.password === pass.trim()) {
-            console.log("✅ LOGIN EXITOSO para:", dbUser.slug);
-            return res.json({ status: "success", token: "valido", slug: dbUser.slug });
-        } else {
-            console.log("❌ CLAVE INCORRECTA");
-            return res.status(401).json({ status: "error", message: "Clave incorrecta" });
+            return res.json({ status: "success", slug: dbUser.slug });
         }
-    } catch (e) {
-        console.error("🔥 ERROR CRÍTICO:", e.message);
-        res.status(500).json({ error: "Error interno" });
-    }
+        res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
+    } catch (e) { res.status(500).json({ error: "Error DB" }); }
 });
 
-// Ruta simple para probar si la API está viva
-app.get("/health", (req, res) => res.send("API VIVA"));
+// --- STATS (Lo que le falta a tu código de 60 líneas) ---
+app.get("/admin-stats/:slug", async (req, res) => {
+    try {
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
+        if (!user) return res.status(404).json({ error: "No user" });
+
+        const sheets = await getSheets(user.sheet_id);
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "Hoja 1!A:E",
+        });
+
+        const rows = response.data.values || [];
+        const dataRows = rows.slice(1);
+        
+        // Fecha Arg simple
+        const hoy = new Date().toLocaleString("es-AR", {timeZone: "America/Argentina/Buenos_Aires", day: '2-digit', month: '2-digit'}).replace("/","/");
+
+        res.json({
+            stats: {
+                turnosHoy: dataRows.filter(r => r[3] === hoy).length,
+                turnosMensuales: dataRows.length, // Opcional: filtrar por mes
+                totalTurnos: dataRows.length,
+                ingresosEstimados: dataRows.length * (user.precio || 10000)
+            }
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API en puerto ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Ready on port ${PORT}`));
