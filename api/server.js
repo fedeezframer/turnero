@@ -9,8 +9,12 @@ app.use(express.json());
 
 // --- CONEXIÓN A SUPABASE ---
 const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY; 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabaseKey = process.env.SUPABASE_KEY;
+
+// Si no hay key, creamos un cliente "vacío" para que el servidor no explote al arrancar
+const supabase = supabaseKey 
+    ? createClient(supabaseUrl, supabaseKey) 
+    : null;
 
 // --- HELPER FECHA ARGENTINA ---
 const getBAInfo = () => {
@@ -29,7 +33,7 @@ async function getSheetsInstance(clientSheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+            private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
         },
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
@@ -40,20 +44,17 @@ async function getSheetsInstance(clientSheetId) {
 // --- RUTA LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
+    if (!supabase) return res.status(500).json({ error: "Supabase no configurado" });
+    
     try {
-        const { data, error } = await supabase
-            .from('usuarios')
-            .select('*')
-            .eq('email', user)
-            .single();
-
+        const { data } = await supabase.from('usuarios').select('*').eq('email', user).single();
         if (data && data.password === pass) {
             res.json({ status: "success", token: "sesion_valida_2026", slug: data.slug });
         } else {
             res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
         }
     } catch (e) {
-        res.status(500).json({ error: "Error en el servidor" });
+        res.status(500).json({ error: "Error en base de datos" });
     }
 });
 
@@ -61,8 +62,10 @@ app.post("/admin-login", async (req, res) => {
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { slug } = req.params;
+        if (!supabase) return res.status(500).json({ error: "Supabase no configurado" });
+
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "No existe el usuario" });
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
@@ -86,7 +89,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 totalTurnos: dataRows.length,
                 nombreNegocio: user.business_name
             },
-            turnos: dataRows.reverse().slice(0, 10) // Mandamos los últimos 10
+            turnos: dataRows.reverse().slice(0, 10)
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -98,10 +101,7 @@ app.post("/create-booking/:slug", async (req, res) => {
     try {
         const { slug } = req.params;
         const { name, phone, email, fecha, hora } = req.body;
-
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).send("Error");
-
         const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
 
         await sheets.spreadsheets.values.append({
@@ -110,7 +110,6 @@ app.post("/create-booking/:slug", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone, email, fecha, hora]] },
         });
-
         res.json({ status: "success" });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -118,4 +117,7 @@ app.post("/create-booking/:slug", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Plataforma Online en puerto ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 Server corriendo.`);
+    if (!supabaseKey) console.log("⚠️ ATENCIÓN: Falta SUPABASE_KEY en Environment Variables");
+});
