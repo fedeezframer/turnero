@@ -9,23 +9,15 @@ app.use(express.json());
 
 // --- CONEXIÓN A SUPABASE ---
 const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY;
-
-// Si no hay key, creamos un cliente "vacío" para que el servidor no explote al arrancar
-const supabase = supabaseKey 
-    ? createClient(supabaseUrl, supabaseKey) 
-    : null;
+const supabaseKey = process.env.SUPABASE_KEY; 
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- HELPER FECHA ARGENTINA ---
 const getBAInfo = () => {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
     const dia = String(now.getDate()).padStart(2, '0');
     const mes = String(now.getMonth() + 1).padStart(2, '0');
-    return {
-        hoy: `${dia}/${mes}`,
-        mesActual: `/${mes}`,
-        full: now.toISOString().split("T")[0]
-    };
+    return { hoy: `${dia}/${mes}`, mesActual: `/${mes}` };
 };
 
 // --- HELPER GOOGLE SHEETS ---
@@ -33,7 +25,7 @@ async function getSheetsInstance(clientSheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
         },
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
@@ -44,17 +36,27 @@ async function getSheetsInstance(clientSheetId) {
 // --- RUTA LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
-    if (!supabase) return res.status(500).json({ error: "Supabase no configurado" });
+    console.log(`Intento de login para: ${user}`);
     
     try {
-        const { data } = await supabase.from('usuarios').select('*').eq('email', user).single();
-        if (data && data.password === pass) {
-            res.json({ status: "success", token: "sesion_valida_2026", slug: data.slug });
+        const { data, error } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('email', user)
+            .single();
+
+        if (error || !data) {
+            return res.status(401).json({ status: "error", message: "Usuario no encontrado" });
+        }
+
+        if (data.password === pass) {
+            console.log("Login exitoso para:", data.slug);
+            res.json({ status: "success", token: "sesion_2026", slug: data.slug });
         } else {
-            res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
+            res.status(401).json({ status: "error", message: "Clave incorrecta" });
         }
     } catch (e) {
-        res.status(500).json({ error: "Error en base de datos" });
+        res.status(500).json({ error: "Error de servidor" });
     }
 });
 
@@ -62,15 +64,14 @@ app.post("/admin-login", async (req, res) => {
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { slug } = req.params;
-        if (!supabase) return res.status(500).json({ error: "Supabase no configurado" });
-
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+        
+        if (!user) return res.status(404).json({ error: "No existe el usuario" });
 
         const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: sheetId,
-            range: "Hoja 1!A:E",
+            range: "Hoja 1!A:Z",
         });
 
         const rows = response.data.values || [];
@@ -88,36 +89,12 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 horasTrabajadas: (turnosMensuales * 0.75).toFixed(1),
                 totalTurnos: dataRows.length,
                 nombreNegocio: user.business_name
-            },
-            turnos: dataRows.reverse().slice(0, 10)
+            }
         });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// --- RUTA CREAR TURNO ---
-app.post("/create-booking/:slug", async (req, res) => {
-    try {
-        const { slug } = req.params;
-        const { name, phone, email, fecha, hora } = req.body;
-        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
-
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: sheetId,
-            range: "Hoja 1!A:E",
-            valueInputOption: "RAW",
-            requestBody: { values: [[name, phone, email, fecha, hora]] },
-        });
-        res.json({ status: "success" });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server corriendo.`);
-    if (!supabaseKey) console.log("⚠️ ATENCIÓN: Falta SUPABASE_KEY en Environment Variables");
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Plataforma Online`));
