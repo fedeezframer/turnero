@@ -6,110 +6,90 @@ const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-// Helper para obtener la fecha de Buenos Aires formateada
+// Helper para fecha BA
 const getBAInfo = () => {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
     return {
-        full: now.toISOString().split("T")[0], // YYYY-MM-DD
+        full: now.toISOString().split("T")[0],
         dia: String(now.getDate()).padStart(2, '0'),
         mes: String(now.getMonth() + 1).padStart(2, '0'),
         hora: now.getHours(),
-        min: now.getMinutes(),
-        raw: now
+        min: now.getMinutes()
     };
 };
 
+// --- RUTAS DE CLIENTE (CALENDARIO) ---
+
 app.get("/check-availability", async (req, res) => {
     try {
-        const { fecha } = req.query; // Viene como YYYY-MM-DD
+        const { fecha } = req.query; 
         if (!fecha) return res.status(400).json({ error: "Falta fecha" });
-
         const allData = await getFullData();
         const ba = getBAInfo();
-
-        // 1. Obtener turnos ocupados desde el Sheets
         let ocupados = allData.map(d => d.turno); 
 
-        // 2. Si la consulta es para HOY, bloquear horas pasadas
         if (fecha === ba.full) {
-            // Recorremos desde las 00:00 hasta la hora actual
             for (let h = 0; h <= ba.hora; h++) {
-                const horaString = `${h}:00`;
-                const horaMediaString = `${h}:30`;
-
-                // Bloqueamos horas anteriores por completo
                 if (h < ba.hora) {
-                    ocupados.push(`${ba.dia}/${ba.mes} - ${horaString}`);
-                    ocupados.push(`${ba.dia}/${ba.mes} - ${horaMediaString}`);
+                    ocupados.push(`${ba.dia}/${ba.mes} - ${h}:00`, `${ba.dia}/${ba.mes} - ${h}:30`);
                 }
-                // Si es la hora actual, bloqueamos según los minutos
                 if (h === ba.hora) {
-                    ocupados.push(`${ba.dia}/${ba.mes} - ${horaString}`);
-                    if (ba.min >= 30) {
-                        ocupados.push(`${ba.dia}/${ba.mes} - ${horaMediaString}`);
-                    }
+                    ocupados.push(`${ba.dia}/${ba.mes} - ${h}:00`);
+                    if (ba.min >= 30) ocupados.push(`${ba.dia}/${ba.mes} - ${h}:30`);
                 }
             }
         }
-
         res.json({ ocupados });
-    } catch (e) {
-        console.error("Error availability:", e);
-        res.status(500).json({ error: "Error de consulta" });
-    }
+    } catch (e) { res.status(500).json({ error: "Error consulta" }); }
 });
 
 app.post("/create-booking", async (req, res) => {
     try {
-        const { name, phone, email, fecha, hora } = req.body; 
-        // fecha: "2026-03-19", hora: "15:30"
-        
-        const rows = await getFullData();
-        const ba = getBAInfo();
-
-        // VALIDACIÓN: ¿Ya tiene un turno para esta fecha o a futuro?
-        const tieneTurnoActivo = rows.some(row => {
-            if (!row.turno || !row.phone) return false;
-            if (row.phone !== phone) return false;
-
-            // Extraemos fecha del turno "19/03 - 15:30" -> "03-19"
-            const [fechaTurno] = row.turno.split(" - ");
-            const [d, m] = fechaTurno.split("/");
-            
-            // Comparamos mes y día (simplificado para los 2 meses de ventana)
-            const valorTurno = parseInt(m) * 100 + parseInt(d);
-            const valorHoy = parseInt(ba.mes) * 100 + parseInt(ba.dia);
-
-            return valorTurno >= valorHoy;
-        });
-
-        if (tieneTurnoActivo) {
-            return res.status(400).json({ 
-                status: "error", 
-                message: "Ya tenés un turno agendado para los próximos días." 
-            });
-        }
-
-        // Guardamos pasando los campos por separado para que sheets.js los procese
+        const { name, phone, email, fecha, hora } = req.body;
         const success = await saveToSheets({ name, phone, email, fecha, hora });
-        
         res.json(success ? { status: "success" } : { status: "error" });
-    } catch (e) {
-        console.error("Error booking:", e);
-        res.status(500).json({ error: e.message });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- RUTAS DE ADMIN (DASHBOARD) ---
+
+app.post("/admin-login", (req, res) => {
+    const { user, pass } = req.body;
+    const ADMIN_USER = process.env.ADMIN_USER || "admin";
+    const ADMIN_PASS = process.env.ADMIN_PASS || "clave123";
+
+    if (user === ADMIN_USER && pass === ADMIN_PASS) {
+        res.json({ status: "success", token: "secret-admin-session-2026" });
+    } else {
+        res.status(401).json({ status: "error", message: "Credenciales inválidas" });
     }
+});
+
+app.get("/admin-stats", async (req, res) => {
+    try {
+        const allData = await getFullData();
+        const PRECIO = 10000; // Podés cambiar esto o sacarlo de una Env Var
+        
+        // Automatización de cálculos
+        const totalTurnos = allData.length;
+        const ingresosTotales = totalTurnos * PRECIO;
+        
+        // Turnos de hoy
+        const ba = getBAInfo();
+        const hoyStr = `${ba.dia}/${ba.mes}`;
+        const turnosHoy = allData.filter(d => d.turno.startsWith(hoyStr)).length;
+
+        res.json({
+            stats: {
+                totalTurnos,
+                turnosHoy,
+                ingresosTotales,
+                balanceHoy: turnosHoy * PRECIO
+            },
+            turnos: allData.reverse() // Los más nuevos primero
+        });
+    } catch (e) { res.status(500).json({ error: "Error stats" }); }
 });
 
 const PORT = process.env.PORT || 10000;
-
-// Agregamos este pequeño fix para evitar que el proceso se quede "pegado"
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 API activa en puerto ${PORT}`);
-}).on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-        console.log('El puerto está ocupado, reintentando...');
-        setTimeout(() => {
-            process.exit(1); // Forzamos el cierre para que Render lo reinicie limpio
-        }, 1000);
-    }
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Motor Admin Ready`));
