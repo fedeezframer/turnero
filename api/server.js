@@ -11,13 +11,12 @@ const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY; 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Helper para fecha de Argentina
+// Fecha Argentina (DD/MM)
 const getBAInfo = () => {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
-    return {
-        hoyStr: `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}`,
-        mesActual: `/${String(now.getMonth() + 1).padStart(2, '0')}`
-    };
+    const dia = String(now.getDate()).padStart(2, '0');
+    const mes = String(now.getMonth() + 1).padStart(2, '0');
+    return { hoy: `${dia}/${mes}`, mesActual: `/${mes}` };
 };
 
 async function getSheetsInstance(clientSheetId) {
@@ -32,57 +31,42 @@ async function getSheetsInstance(clientSheetId) {
     return { sheets: google.sheets({ version: "v4", auth: client }), sheetId: clientSheetId };
 }
 
-app.post("/admin-login", async (req, res) => {
-    const { user, pass } = req.body;
-    const { data } = await supabase.from('usuarios').select('*').eq('email', user).single();
-    if (data && data.password === pass) {
-        res.json({ status: "success", token: "sesion_valida_2026", slug: data.slug });
-    } else {
-        res.status(401).json({ status: "error" });
-    }
-});
-
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { slug } = req.params;
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (!user) return res.status(404).send("User error");
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "Hoja 1!A:E" });
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range: "Hoja 1!A:Z", 
+        });
 
         const rows = response.data.values || [];
-        const cleanData = rows.slice(1).map(r => ({ name: r[0], phone: r[1], fecha: r[3], turno: `${r[3]} - ${r[4]}` }));
-        
+        const dataRows = rows.slice(1); 
         const ba = getBAInfo();
-        const turnosHoy = cleanData.filter(d => d.fecha === ba.hoyStr).length;
-        const turnosMes = cleanData.filter(d => d.fecha.includes(ba.mesActual)).length;
 
+        // Conteo basado en la columna D (índice 3)
+        const turnosHoy = dataRows.filter(row => row[3] === ba.hoy).length;
+        const turnosMensuales = dataRows.filter(row => row[3] && row[3].includes(ba.mesActual)).length;
+        
         res.json({
             stats: {
-                turnosHoy: turnosHoy,
-                turnosMensuales: turnosMes,
-                ingresosEstimados: turnosMes * (user.precio || 10000),
-                horasTrabajadas: (turnosMes * 0.75).toFixed(1), // 45 min por turno
-                totalTurnos: cleanData.length,
+                turnosHoy,
+                turnosMensuales,
+                ingresosEstimados: turnosMensuales * (user.precio || 10000),
+                horasTrabajadas: (turnosMensuales * 0.75).toFixed(1),
+                totalTurnos: dataRows.length,
                 nombreNegocio: user.business_name
-            },
-            turnos: cleanData.reverse()
+            }
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.post("/create-booking/:slug", async (req, res) => {
-    const { slug } = req.params;
-    const { name, phone, email, fecha, hora } = req.body;
-    const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-    const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
-    await sheets.spreadsheets.values.append({
-        spreadsheetId: sheetId, range: "Hoja 1!A:E", valueInputOption: "RAW",
-        requestBody: { values: [[name, phone, email, fecha, hora]] },
-    });
-    res.json({ status: "success" });
-});
+// Ruta para el login y creación de turnos (mantenelas igual)
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server Multi-tenant Ready`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API vinculada al Sheets`));
