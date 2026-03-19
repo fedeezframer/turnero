@@ -9,7 +9,6 @@ app.use(express.json());
 
 const supabase = createClient('https://xyhuzdtpjlmtadqamywu.supabase.co', process.env.SUPABASE_KEY);
 
-// --- HELPER GOOGLE SHEETS ---
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -22,21 +21,29 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// --- LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
+    console.log("Intento de login:", user);
     try {
         const { data: dbUser } = await supabase.from('usuarios')
             .select('*').eq('email', user.trim().toLowerCase()).single();
 
         if (dbUser && dbUser.password === pass.trim()) {
-            return res.json({ status: "success", slug: dbUser.slug });
+            console.log("✅ Login OK para:", dbUser.slug);
+            // AGREGAMOS EL TOKEN AQUÍ
+            return res.json({ 
+                status: "success", 
+                slug: dbUser.slug, 
+                token: "token_valido_2026" 
+            });
         }
         res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
-    } catch (e) { res.status(500).json({ error: "Error DB" }); }
+    } catch (e) { 
+        console.error("❌ Error DB:", e.message);
+        res.status(500).json({ error: "Error DB" }); 
+    }
 });
 
-// --- STATS (Lo que le falta a tu código de 60 líneas) ---
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -50,14 +57,12 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         const rows = response.data.values || [];
         const dataRows = rows.slice(1);
-        
-        // Fecha Arg simple
-        const hoy = new Date().toLocaleString("es-AR", {timeZone: "America/Argentina/Buenos_Aires", day: '2-digit', month: '2-digit'}).replace("/","/");
+        const hoy = new Date().toLocaleString("es-AR", {timeZone: "America/Argentina/Buenos_Aires", day: '2-digit', month: '2-digit'});
 
         res.json({
             stats: {
                 turnosHoy: dataRows.filter(r => r[3] === hoy).length,
-                turnosMensuales: dataRows.length, // Opcional: filtrar por mes
+                turnosMensuales: dataRows.length,
                 totalTurnos: dataRows.length,
                 ingresosEstimados: dataRows.length * (user.precio || 10000)
             }
@@ -66,4 +71,4 @@ app.get("/admin-stats/:slug", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Ready on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server on port ${PORT}`));
