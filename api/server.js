@@ -4,11 +4,19 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
+
+// CORS Config: Permite que Framer se conecte sin bloqueos
+app.use(cors({ 
+    origin: '*', 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
+// Conexión a Supabase
 const supabase = createClient('https://xyhuzdtpjlmtadqamywu.supabase.co', process.env.SUPABASE_KEY);
 
+// Helper para Google Sheets
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -21,33 +29,67 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
+// --- RUTA DE LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
-    console.log("Intento de login:", user);
-    try {
-        const { data: dbUser } = await supabase.from('usuarios')
-            .select('*').eq('email', user.trim().toLowerCase()).single();
+    const cleanUser = user?.trim().toLowerCase();
+    
+    console.log("--- NUEO INTENTO DE LOGIN ---");
+    console.log("Buscando usuario:", cleanUser);
 
-        if (dbUser && dbUser.password === pass.trim()) {
-            console.log("✅ Login OK para:", dbUser.slug);
-            // AGREGAMOS EL TOKEN AQUÍ
+    try {
+        // Buscamos en la tabla 'usuarios'
+        const { data: users, error } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('email', cleanUser);
+
+        if (error) {
+            console.error("❌ Error de Supabase:", error.message);
+            return res.status(500).json({ status: "error", message: "Error de DB" });
+        }
+
+        // Si la lista de usuarios vuelve vacía
+        if (!users || users.length === 0) {
+            console.log("❌ USUARIO NO ENCONTRADO:", cleanUser);
+            return res.status(401).json({ status: "error", message: "Email no registrado" });
+        }
+
+        const dbUser = users[0];
+
+        // Verificamos contraseña
+        if (dbUser.password === pass.trim()) {
+            console.log("✅ LOGIN EXITOSO para:", dbUser.slug);
             return res.json({ 
                 status: "success", 
                 slug: dbUser.slug, 
                 token: "token_valido_2026" 
             });
+        } else {
+            console.log("❌ CONTRASEÑA INCORRECTA para:", cleanUser);
+            return res.status(401).json({ status: "error", message: "Clave incorrecta" });
         }
-        res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
-    } catch (e) { 
-        console.error("❌ Error DB:", e.message);
-        res.status(500).json({ error: "Error DB" }); 
+
+    } catch (e) {
+        console.error("🔥 FALLO CRÍTICO:", e.message);
+        res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
+// --- RUTA DE ESTADÍSTICAS ---
 app.get("/admin-stats/:slug", async (req, res) => {
+    const { slug } = req.params;
+    console.log("Cargando stats para:", slug);
+
     try {
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
-        if (!user) return res.status(404).json({ error: "No user" });
+        // Traemos los datos del usuario por su slug
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('slug', slug)
+            .single();
+
+        if (error || !user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
@@ -56,19 +98,34 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
 
         const rows = response.data.values || [];
-        const dataRows = rows.slice(1);
-        const hoy = new Date().toLocaleString("es-AR", {timeZone: "America/Argentina/Buenos_Aires", day: '2-digit', month: '2-digit'});
+        const dataRows = rows.slice(1); // Quitamos encabezados
+        
+        // Fecha actual en formato DD/MM para comparar con tu Sheets
+        const hoy = new Date().toLocaleString("es-AR", {
+            timeZone: "America/Argentina/Buenos_Aires", 
+            day: '2-digit', 
+            month: '2-digit'
+        });
 
         res.json({
             stats: {
-                turnosHoy: dataRows.filter(r => r[3] === hoy).length,
+                turnosHoy: dataRows.filter(r => r[2] && r[2].includes(hoy)).length, // Columna C/D según tu sheets.js
                 turnosMensuales: dataRows.length,
                 totalTurnos: dataRows.length,
-                ingresosEstimados: dataRows.length * (user.precio || 10000)
+                ingresosEstimados: dataRows.length * (user.precio || 10000),
+                nombreNegocio: user.business_name || user.slug
             }
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error("❌ Error Stats:", e.message);
+        res.status(500).json({ error: "No se pudieron cargar las estadísticas" });
+    }
 });
 
+// Ruta de salud
+app.get("/health", (req, res) => res.send("Servidor Activo 🚀"));
+
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+});
