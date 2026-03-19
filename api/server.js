@@ -5,7 +5,6 @@ import { google } from "googleapis";
 
 const app = express();
 
-// CORS Config: Permite que Framer se conecte sin bloqueos
 app.use(cors({ 
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -13,10 +12,8 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Conexión a Supabase
 const supabase = createClient('https://xyhuzdtpjlmtadqamywu.supabase.co', process.env.SUPABASE_KEY);
 
-// Helper para Google Sheets
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -29,56 +26,37 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// --- RUTA DE LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
     const cleanUser = user?.trim().toLowerCase();
     
-    console.log("--- NUEO INTENTO DE LOGIN ---");
-    console.log("Buscando usuario:", cleanUser);
-
     try {
-        // Buscamos en la tabla 'usuarios'
         const { data: users, error } = await supabase
             .from('usuarios')
             .select('*')
             .eq('email', cleanUser);
 
-        if (error) {
-            console.error("❌ Error de Supabase:", error.message);
-            return res.status(500).json({ status: "error", message: "Error de DB" });
-        }
-
-        // Si la lista de usuarios vuelve vacía
-        if (!users || users.length === 0) {
-            console.log("❌ USUARIO NO ENCONTRADO:", cleanUser);
-            return res.status(401).json({ status: "error", message: "Email no registrado" });
-        }
+        if (error) return res.status(500).json({ status: "error", message: "Error de DB" });
+        if (!users || users.length === 0) return res.status(401).json({ status: "error", message: "No registrado" });
 
         const dbUser = users[0];
 
-        // Verificamos contraseña
         if (dbUser.password === pass.trim()) {
-            console.log("✅ LOGIN EXITOSO para:", dbUser.slug);
+            console.log("✅ LOGIN OK:", dbUser.slug);
             return res.json({ 
                 status: "success", 
                 slug: dbUser.slug, 
                 token: "token_valido_2026" 
             });
-        } else {
-            console.log("❌ CONTRASEÑA INCORRECTA para:", cleanUser);
-            return res.status(401).json({ status: "error", message: "Clave incorrecta" });
         }
-
+        res.status(401).json({ status: "error", message: "Clave incorrecta" });
     } catch (e) {
-        console.error("🔥 FALLO CRÍTICO:", e.message);
-        res.status(500).json({ error: "Error interno del servidor" });
+        res.status(500).json({ error: "Fallo del servidor" });
     }
 });
 
 app.get("/admin-stats/:slug", async (req, res) => {
     const { slug } = req.params;
-    console.log("Calculando estadísticas para:", slug);
 
     try {
         const { data: user, error } = await supabase
@@ -87,35 +65,39 @@ app.get("/admin-stats/:slug", async (req, res) => {
             .eq('slug', slug)
             .single();
 
-        if (error || !user) return res.status(404).json({ error: "Usuario no encontrado" });
+        if (error || !user) return res.status(404).json({ error: "No user" });
 
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
-            range: "Hoja 1!A:E", // Traemos de la A a la E
+            range: "Hoja 1!A:E", 
         });
 
         const rows = response.data.values || [];
-        const dataRows = rows.slice(1); // Sacamos el encabezado (name, phone, etc)
+        const dataRows = rows.slice(1); 
 
-        // OBTENER FECHA DE HOY EXACTA (Formato DD/M/YYYY como en tu foto)
-        // Nota: Tu tabla tiene 18/3/2026 (sin el 0 en el mes). 
-        const date = new Date();
-        const hoy = `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}`;
-        
-        console.log("Buscando turnos para fecha:", hoy);
+        // --- LÓGICA DE FECHA ARGENTINA ---
+        // Obtenemos la fecha en formato D/M/YYYY (ej: 19/3/2026)
+        const hoyArgentina = new Intl.DateTimeFormat('es-AR', {
+            timeZone: 'America/Argentina/Buenos_Aires',
+            day: 'numeric',
+            month: 'numeric',
+            year: 'numeric'
+        }).format(new Date());
 
-        // FILTRAMOS:
-        // r[3] es la columna D (semana)
+        console.log(`📊 Stats para ${slug}. Fecha hoy: ${hoyArgentina}`);
+
+        // FILTRAMOS EN COLUMNA D (Índice 3)
         const turnosDeHoy = dataRows.filter(r => {
             const fechaFila = r[3] ? r[3].trim() : "";
-            return fechaFila === hoy;
+            // Comparamos el texto exacto (ej: "19/3/2026" === "19/3/2026")
+            return fechaFila === hoyArgentina;
         });
 
         res.json({
             stats: {
                 turnosHoy: turnosDeHoy.length,
-                turnosMensuales: dataRows.length, // Total de la lista por ahora
+                turnosMensuales: dataRows.length,
                 totalTurnos: dataRows.length,
                 ingresosEstimados: turnosDeHoy.length * (user.precio || 10000),
                 nombreNegocio: user.business_name || user.slug
@@ -128,10 +110,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
-// Ruta de salud
-app.get("/health", (req, res) => res.send("Servidor Activo 🚀"));
+app.get("/health", (req, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Port ${PORT}`));
