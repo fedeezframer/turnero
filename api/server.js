@@ -1,89 +1,100 @@
 import express from "express";
 import cors from "cors";
-import { saveToSheets, getFullData } from "./sheets.js";
+import { createClient } from '@supabase/supabase-js';
+import { google } from "googleapis";
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-// Configuración predeterminada (puedes mover esto a Env Vars en Render)
-const ADMIN_USER = process.env.ADMIN_USER || "admin";
-const ADMIN_PASS = process.env.ADMIN_PASS || "clave123";
-const PRECIO_TURNO = 10000; 
+// --- CONEXIÓN A SUPABASE ---
+// Poné tu ANON_KEY acá o en las variables de entorno de Render
+const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY; 
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-const getBAInfo = () => {
-    const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
-    return {
-        full: now.toISOString().split("T")[0],
-        dia: String(now.getDate()).padStart(2, '0'),
-        mes: String(now.getMonth() + 1).padStart(2, '0'),
-        hora: now.getHours(),
-        min: now.getMinutes()
-    };
-};
+// --- HELPER GOOGLE SHEETS DINÁMICO ---
+async function getSheetsInstance(clientSheetId) {
+    const auth = new google.auth.GoogleAuth({
+        credentials: {
+            client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        },
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const client = await auth.getClient();
+    return { sheets: google.sheets({ version: "v4", auth: client }), sheetId: clientSheetId };
+}
 
-// --- RUTA LOGIN ---
-app.post("/admin-login", (req, res) => {
+// --- RUTA LOGIN MULTI-CLIENTE ---
+app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
-    if (user === ADMIN_USER && pass === ADMIN_PASS) {
-        res.json({ status: "success", token: "sesion_valida_2026" });
+
+    // Buscamos al usuario por email en tu tabla de Supabase
+    const { data, error } = await supabase
+        .from('usuarios')
+        .select('*')
+        .eq('email', user)
+        .single();
+
+    if (data && data.password === pass) {
+        res.json({ 
+            status: "success", 
+            token: "sesion_valida_2026", 
+            slug: data.slug // Le devolvemos su "marca"
+        });
     } else {
-        res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
+        res.status(401).json({ status: "error", message: "Datos incorrectos" });
     }
 });
 
-// --- RUTA ESTADÍSTICAS DASHBOARD ---
-app.get("/admin-stats", async (req, res) => {
+// --- RUTA STATS DINÁMICA ---
+app.get("/admin-stats/:slug", async (req, res) => {
     try {
-        const allData = await getFullData();
-        const ba = getBAInfo();
-        const hoyStr = `${ba.dia}/${ba.mes}`;
+        const { slug } = req.params;
         
-        const turnosHoy = allData.filter(d => d.turno.startsWith(hoyStr)).length;
-        
+        // 1. Buscamos qué Sheet le pertenece a este slug
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
+        if (!user) return res.status(404).send("Usuario no encontrado");
+
+        // 2. Traemos los datos de SU hoja de Google
+        const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range: "Hoja 1!A:E",
+        });
+
+        const rows = response.data.values || [];
+        const cleanData = rows.slice(1).map(r => ({ name: r[0], phone: r[1], email: r[2], turno: `${r[3]} - ${r[4]}` }));
+
         res.json({
             stats: {
-                totalTurnos: allData.length,
-                turnosHoy: turnosHoy,
-                ingresosTotales: allData.length * PRECIO_TURNO,
-                balanceHoy: turnosHoy * PRECIO_TURNO
+                totalTurnos: cleanData.length,
+                ingresosTotales: cleanData.length * (user.precio || 10000),
+                nombreNegocio: user.business_name
             },
-            turnos: allData.reverse() // Los últimos primero
+            turnos: cleanData.reverse()
         });
-    } catch (e) {
-        res.status(500).json({ error: "Error al obtener datos" });
-    }
-});
-
-// --- RUTAS DE RESERVA (CALENDARIO) ---
-app.get("/check-availability", async (req, res) => {
-    try {
-        const { fecha } = req.query;
-        const allData = await getFullData();
-        const ba = getBAInfo();
-        let ocupados = allData.map(d => d.turno);
-
-        if (fecha === ba.full) {
-            for (let h = 0; h <= ba.hora; h++) {
-                if (h < ba.hora) {
-                    ocupados.push(`${ba.dia}/${ba.mes} - ${h}:00`, `${ba.dia}/${ba.mes} - ${h}:30`);
-                }
-                if (h === ba.hora) {
-                    ocupados.push(`${ba.dia}/${ba.mes} - ${h}:00`);
-                    if (ba.min >= 30) ocupados.push(`${ba.dia}/${ba.mes} - ${h}:30`);
-                }
-            }
-        }
-        res.json({ ocupados });
-    } catch (e) { res.status(500).json({ error: "Error" }); }
-});
-
-app.post("/create-booking", async (req, res) => {
-    try {
-        const success = await saveToSheets(req.body);
-        res.json(success ? { status: "success" } : { status: "error" });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- RUTA CREAR TURNO (Desde el Calendario) ---
+app.post("/create-booking/:slug", async (req, res) => {
+    const { slug } = req.params;
+    const { name, phone, email, fecha, hora } = req.body;
+
+    const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
+    const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: sheetId,
+        range: "Hoja 1!A:E",
+        valueInputOption: "RAW",
+        requestBody: { values: [[name, phone, email, fecha, hora]] },
+    });
+
+    res.json({ status: "success" });
+});
+
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server Ready`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Plataforma Multi-Cliente Online`));
