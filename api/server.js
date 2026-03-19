@@ -6,7 +6,16 @@ const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-// Helper para fecha BA
+// --- CONFIGURACIÓN DINÁMICA (Esto es lo que el cliente cambia) ---
+let clientConfig = {
+    precioServicio: 10000,
+    intervalo: "30", // cada cuántos min son los turnos
+    inicioHora: 10,
+    finHora: 18,
+    nombreNegocio: "Mi Negocio",
+    colorPrincipal: "#000000"
+};
+
 const getBAInfo = () => {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
     return {
@@ -17,6 +26,17 @@ const getBAInfo = () => {
         min: now.getMinutes()
     };
 };
+
+// --- RUTAS DE CONFIGURACIÓN ---
+
+app.get("/get-config", (req, res) => res.json(clientConfig));
+
+app.post("/update-config", (req, res) => {
+    const { token, newConfig } = req.body;
+    if (token !== "token-sesion-admin-2026") return res.status(401).send("No autorizado");
+    clientConfig = { ...clientConfig, ...newConfig };
+    res.json({ status: "success", config: clientConfig });
+});
 
 // --- RUTAS DE CLIENTE (CALENDARIO) ---
 
@@ -39,7 +59,7 @@ app.get("/check-availability", async (req, res) => {
                 }
             }
         }
-        res.json({ ocupados });
+        res.json({ ocupados, config: clientConfig });
     } catch (e) { res.status(500).json({ error: "Error consulta" }); }
 });
 
@@ -57,9 +77,8 @@ app.post("/admin-login", (req, res) => {
     const { user, pass } = req.body;
     const ADMIN_USER = process.env.ADMIN_USER || "admin";
     const ADMIN_PASS = process.env.ADMIN_PASS || "clave123";
-
     if (user === ADMIN_USER && pass === ADMIN_PASS) {
-        res.json({ status: "success", token: "secret-admin-session-2026" });
+        res.json({ status: "success", token: "token-sesion-admin-2026" });
     } else {
         res.status(401).json({ status: "error", message: "Credenciales inválidas" });
     }
@@ -68,13 +87,7 @@ app.post("/admin-login", (req, res) => {
 app.get("/admin-stats", async (req, res) => {
     try {
         const allData = await getFullData();
-        const PRECIO = 10000; // Podés cambiar esto o sacarlo de una Env Var
-        
-        // Automatización de cálculos
         const totalTurnos = allData.length;
-        const ingresosTotales = totalTurnos * PRECIO;
-        
-        // Turnos de hoy
         const ba = getBAInfo();
         const hoyStr = `${ba.dia}/${ba.mes}`;
         const turnosHoy = allData.filter(d => d.turno.startsWith(hoyStr)).length;
@@ -83,10 +96,11 @@ app.get("/admin-stats", async (req, res) => {
             stats: {
                 totalTurnos,
                 turnosHoy,
-                ingresosTotales,
-                balanceHoy: turnosHoy * PRECIO
+                ingresosTotales: totalTurnos * clientConfig.precioServicio,
+                balanceHoy: turnosHoy * clientConfig.precioServicio
             },
-            turnos: allData.reverse() // Los más nuevos primero
+            config: clientConfig,
+            turnos: allData.reverse()
         });
     } catch (e) { res.status(500).json({ error: "Error stats" }); }
 });
