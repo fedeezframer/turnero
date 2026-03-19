@@ -101,5 +101,15 @@ app.post("/create-booking", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API activa y actualizada`)); 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API activa`));
+
+// Agregamos este pequeño fix para evitar que el proceso se quede "pegado"
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 API activa en puerto ${PORT}`);
+}).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.log('El puerto está ocupado, reintentando...');
+        setTimeout(() => {
+            process.exit(1); // Forzamos el cierre para que Render lo reinicie limpio
+        }, 1000);
+    }
+});
