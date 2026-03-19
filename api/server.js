@@ -7,12 +7,10 @@ const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.use(express.json());
 
-// --- CONEXIÓN A SUPABASE ---
 const supabaseUrl = 'https://xyhuzdtpjlmtadqamywu.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY; 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- HELPER FECHA ARGENTINA ---
 const getBAInfo = () => {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
     const dia = String(now.getDate()).padStart(2, '0');
@@ -20,7 +18,6 @@ const getBAInfo = () => {
     return { hoy: `${dia}/${mes}`, mesActual: `/${mes}` };
 };
 
-// --- HELPER GOOGLE SHEETS ---
 async function getSheetsInstance(clientSheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -36,27 +33,19 @@ async function getSheetsInstance(clientSheetId) {
 // --- RUTA LOGIN ---
 app.post("/admin-login", async (req, res) => {
     const { user, pass } = req.body;
-    console.log(`Intento de login para: ${user}`);
-    
     try {
-        const { data, error } = await supabase
+        const { data: dbUser } = await supabase
             .from('usuarios')
             .select('*')
-            .eq('email', user)
+            .eq('email', user.trim())
             .single();
 
-        if (error || !data) {
-            return res.status(401).json({ status: "error", message: "Usuario no encontrado" });
+        if (dbUser && dbUser.password === pass.trim()) {
+            return res.json({ status: "success", token: "valido", slug: dbUser.slug });
         }
-
-        if (data.password === pass) {
-            console.log("Login exitoso para:", data.slug);
-            res.json({ status: "success", token: "sesion_2026", slug: data.slug });
-        } else {
-            res.status(401).json({ status: "error", message: "Clave incorrecta" });
-        }
+        res.status(401).json({ status: "error", message: "Credenciales incorrectas" });
     } catch (e) {
-        res.status(500).json({ error: "Error de servidor" });
+        res.status(500).json({ error: "Error de conexión con la DB" });
     }
 });
 
@@ -66,16 +55,18 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const { slug } = req.params;
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         
-        if (!user) return res.status(404).json({ error: "No existe el usuario" });
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const { sheets, sheetId } = await getSheetsInstance(user.sheet_id);
+        
+        // Obtenemos los datos de la Hoja 1
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: sheetId,
-            range: "Hoja 1!A:Z",
+            range: "Hoja 1!A:E", 
         });
 
         const rows = response.data.values || [];
-        const dataRows = rows.slice(1);
+        const dataRows = rows.slice(1); // Quitamos el encabezado
         const ba = getBAInfo();
 
         const turnosHoy = dataRows.filter(r => r[3] === ba.hoy).length;
@@ -97,4 +88,4 @@ app.get("/admin-stats/:slug", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Plataforma Online`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API Operativa`));
