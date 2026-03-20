@@ -39,7 +39,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA
+// 2. CREAR RESERVA (Guardado estricto con ceros a la izquierda)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -47,8 +47,13 @@ app.post("/create-booking", async (req, res) => {
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
+        
+        // Normalizamos fecha: YYYY-MM-DD -> DD/MM
         const [y, m, d] = fecha.split("-");
-        const textoTurno = `${d}/${m} - ${hora}`;
+        const diaNorm = String(d).padStart(2, '0');
+        const mesNorm = String(m).padStart(2, '0');
+        
+        const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`;
         
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
@@ -61,12 +66,43 @@ app.post("/create-booking", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
+        
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
+// 3. OBTENER OCUPADOS (Para el componente TimeSlots de Framer)
+app.get("/get-occupied", async (req, res) => {
+    try {
+        const { fecha, slug } = req.query; // fecha viene como "DD/MM"
+        if (!fecha || !slug) return res.status(400).json({ error: "Faltan parámetros" });
+
+        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
+        const sheets = await getSheets(user.sheet_id);
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "C:C",
+        });
+
+        const rows = response.data.values || [];
+        
+        // Filtramos solo los turnos que coincidan con la fecha seleccionada
+        const ocupados = rows
+            .flat()
+            .filter(val => val && val.startsWith(fecha.trim()));
+
+        console.log(`[Occupied] Solicitud para ${fecha} (${slug}): ${ocupados.length} encontrados`);
+        res.json({ success: true, ocupados });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 4. ADMIN STATS (Dashboard)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -92,9 +128,8 @@ app.get("/admin-stats/:slug", async (req, res) => {
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             
-            // Limpiamos el valor de la celda por si tiene espacios o formatos raros
             const valorTurno = r[2].trim(); 
-            const fechaParte = valorTurno.split(" - ")[0]; // Extrae "DD/MM"
+            const fechaParte = valorTurno.split(" - ")[0]; 
             const partes = fechaParte.split("/");
             
             if (partes.length >= 2) {
@@ -103,8 +138,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
                 if (mes === mesHoyNum) {
                     turnosMes++;
-                    
-                    // Clasificación por semana
                     if (dia <= 7) semanas["Sem 1"]++;
                     else if (dia <= 14) semanas["Sem 2"]++;
                     else if (dia <= 21) semanas["Sem 3"]++;
