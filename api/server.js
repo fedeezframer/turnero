@@ -39,7 +39,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Guardado estricto con ceros a la izquierda)
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -55,6 +55,7 @@ app.post("/create-booking", async (req, res) => {
         
         const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`;
         
+        // Fecha de registro en la Sheet (Hora Argentina)
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
@@ -73,10 +74,10 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. OBTENER OCUPADOS (Para el componente TimeSlots de Framer)
+// 3. OBTENER OCUPADOS (Filtro exacto por fecha)
 app.get("/get-occupied", async (req, res) => {
     try {
-        const { fecha, slug } = req.query; // fecha viene como "DD/MM"
+        const { fecha, slug } = req.query; // fecha: "DD/MM"
         if (!fecha || !slug) return res.status(400).json({ error: "Faltan parámetros" });
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
@@ -90,12 +91,15 @@ app.get("/get-occupied", async (req, res) => {
 
         const rows = response.data.values || [];
         
-        // Filtramos solo los turnos que coincidan con la fecha seleccionada
+        // Filtro exacto: Solo turnos que empiecen con "DD/MM -" 
+        // Esto evita que "20/03" bloquee horarios del "21/03"
+        const filtroFecha = `${fecha.trim()} -`;
         const ocupados = rows
             .flat()
-            .filter(val => val && val.startsWith(fecha.trim()));
+            .filter(val => val && val.startsWith(filtroFecha))
+            .map(val => val.trim());
 
-        console.log(`[Occupied] Solicitud para ${fecha} (${slug}): ${ocupados.length} encontrados`);
+        console.log(`[Occupied] ${fecha} para ${slug}: ${ocupados.length} encontrados`);
         res.json({ success: true, ocupados });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -115,8 +119,9 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const rows = response.data.values || [];
-        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         
+        // Reloj forzado a Argentina
+        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesHoyNum = ahora.getMonth() + 1;
         const diaHoyNum = ahora.getDate();
         const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesHoyNum).padStart(2, '0')}`;
@@ -154,7 +159,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         }));
 
         const ingresosMensuales = turnosMes * (user.precio || 5000);
-        const promedioDiario = Math.round(ingresosMensuales / diaHoyNum);
+        const promedioDiario = diaHoyNum > 0 ? Math.round(ingresosMensuales / diaHoyNum) : 0;
 
         res.json({
             stats: {
