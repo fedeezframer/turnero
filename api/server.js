@@ -77,32 +77,41 @@ app.get("/admin-stats/:slug", async (req, res) => {
         
         const rows = response.data.values || [];
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
-        const diaHoyNum = ahora.getDate();
         const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0');
-        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${mesHoy}`;
+        const diaHoyStr = String(ahora.getDate()).padStart(2, '0') + "/" + mesHoy;
 
         let turnosHoy = 0;
         let turnosMes = 0;
+        let conteoPorDia = {}; // Para el gráfico
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-            const valorTurno = r[2].trim();
-            const fechaParte = valorTurno.split(" - ")[0];
+            const fechaParte = r[2].trim().split(" - ")[0]; // "DD/MM"
             const [dia, mes] = fechaParte.split("/");
 
-            if (fechaParte === hoyString) turnosHoy++;
-            if (mes === mesHoy) turnosMes++;
+            if (mes === mesHoy) {
+                turnosMes++;
+                // Agrupamos para el gráfico
+                conteoPorDia[fechaParte] = (conteoPorDia[fechaParte] || 0) + 1;
+            }
+            if (fechaParte === diaHoyStr) turnosHoy++;
         });
 
+        // Convertimos el conteo a un array ordenado para el componente de Framer
+        const chartData = Object.keys(conteoPorDia)
+            .map(fecha => ({ fecha, turnos: conteoPorDia[fecha] }))
+            .sort((a, b) => a.fecha.localeCompare(b.fecha))
+            .slice(-7); // Mostramos solo los últimos 7 días con actividad
+
         const ingresosMensuales = turnosMes * (user.precio || 5000);
-        const promedioDiario = Math.round(ingresosMensuales / diaHoyNum);
 
         res.json({
             stats: {
                 turnosHoy,
                 turnosMes,
                 ingresosEstimados: ingresosMensuales,
-                promedioDiario,
+                promedioDiario: Math.round(ingresosMensuales / ahora.getDate()),
+                chartData, // <--- DATOS PARA EL GRÁFICO
                 businessName: user.business_name || user.slug
             }
         });
