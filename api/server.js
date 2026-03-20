@@ -25,6 +25,7 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
+// 1. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const { slug, password } = req.body;
@@ -38,6 +39,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -47,6 +49,7 @@ app.post("/create-booking", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const [y, m, d] = fecha.split("-");
         const textoTurno = `${d}/${m} - ${hora}`;
+        
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
@@ -64,6 +67,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
+// 3. ESTADÍSTICAS Y GRÁFICO POR SEMANAS
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -72,50 +76,69 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:D" 
+            range: "A:C" // Leemos hasta la C que tiene el turno
         });
         
         const rows = response.data.values || [];
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
-        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0');
-        const diaHoyStr = String(ahora.getDate()).padStart(2, '0') + "/" + mesHoy;
+        
+        const diaHoyNum = ahora.getDate();
+        const mesHoyNum = ahora.getMonth() + 1;
+        const mesHoyStr = String(mesHoyNum).padStart(2, '0');
+        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${mesHoyStr}`;
 
         let turnosHoy = 0;
         let turnosMes = 0;
-        let conteoPorDia = {}; // Para el gráfico
+        
+        // Estructura para el gráfico semanal
+        let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-            const fechaParte = r[2].trim().split(" - ")[0]; // "DD/MM"
-            const [dia, mes] = fechaParte.split("/");
+            
+            const valorTurno = r[2].trim();
+            const fechaParte = valorTurno.split(" - ")[0]; // "DD/MM"
+            const [dia, mes] = fechaParte.split("/").map(Number);
 
-            if (mes === mesHoy) {
+            // Filtramos solo los del mes actual
+            if (mes === mesHoyNum) {
                 turnosMes++;
-                // Agrupamos para el gráfico
-                conteoPorDia[fechaParte] = (conteoPorDia[fechaParte] || 0) + 1;
+                
+                // Lógica de agrupación semanal
+                if (dia <= 7) semanas["Sem 1"]++;
+                else if (dia <= 14) semanas["Sem 2"]++;
+                else if (dia <= 21) semanas["Sem 3"]++;
+                else semanas["Sem 4"]++;
             }
-            if (fechaParte === diaHoyStr) turnosHoy++;
+
+            if (fechaParte === hoyString) {
+                turnosHoy++;
+            }
         });
 
-        // Convertimos el conteo a un array ordenado para el componente de Framer
-        const chartData = Object.keys(conteoPorDia)
-            .map(fecha => ({ fecha, turnos: conteoPorDia[fecha] }))
-            .sort((a, b) => a.fecha.localeCompare(b.fecha))
-            .slice(-7); // Mostramos solo los últimos 7 días con actividad
+        // Formateamos los datos para el componente de Framer
+        const chartData = Object.keys(semanas).map(key => ({
+            label: key,
+            turnos: semanas[key]
+        }));
 
         const ingresosMensuales = turnosMes * (user.precio || 5000);
+        const promedioDiario = Math.round(ingresosMensuales / diaHoyNum);
+
+        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes}`);
 
         res.json({
             stats: {
                 turnosHoy,
                 turnosMes,
                 ingresosEstimados: ingresosMensuales,
-                promedioDiario: Math.round(ingresosMensuales / ahora.getDate()),
-                chartData, // <--- DATOS PARA EL GRÁFICO
+                promedioDiario,
+                chartData,
                 businessName: user.business_name || user.slug
             }
         });
     } catch (e) {
+        console.error("Error en stats:", e);
         res.status(500).json({ error: e.message });
     }
 });
