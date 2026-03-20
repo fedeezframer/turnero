@@ -40,7 +40,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Aquí arreglamos lo de la fecha 20/03)
+// 2. CREAR RESERVA (Guarda la fecha de hoy en Columna D)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -49,11 +49,11 @@ app.post("/create-booking", async (req, res) => {
 
         const sheets = await getSheets(user.sheet_id);
 
-        // Formato para columna C (Turno elegido): "25/03 - 15:30"
+        // Formato para columna C (Día del turno): "25/03 - 15:30"
         const [y, m, d] = fecha.split("-");
         const textoTurno = `${d}/${m} - ${hora}`;
 
-        // FECHA DE HOY REAL (Para la columna D / Semana: "20/03/2026")
+        // FECHA DE HOY REAL (Buenos Aires) para la Columna D
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit',
@@ -64,7 +64,7 @@ app.post("/create-booking", async (req, res) => {
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
-            range: "A:D", // Importante: Columnas A, B, C y D
+            range: "A:D", 
             valueInputOption: "RAW",
             requestBody: {
                 values: [[name, phone || "N/A", textoTurno, fechaHoyReal]]
@@ -78,7 +78,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. ESTADÍSTICAS (Ahora cuenta por la columna D)
+// 3. ESTADÍSTICAS (Compara Columna D con Fecha de Hoy)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -87,12 +87,12 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:D" // Leemos hasta la D
+            range: "A:D" 
         });
         
         const rows = response.data.values || [];
         
-        // Fecha de hoy para comparar: "20/03/2026"
+        // Fecha de hoy exacta en Argentina (DD/MM/YYYY)
         const hoy = new Date().toLocaleDateString('es-AR', { 
             day: '2-digit', 
             month: '2-digit', 
@@ -100,13 +100,21 @@ app.get("/admin-stats/:slug", async (req, res) => {
             timeZone: 'America/Argentina/Buenos_Aires' 
         });
 
-        // Filtramos por la columna D (índice 3)
-        const turnosHoy = rows.filter((r, i) => i > 0 && String(r[3] || "") === hoy).length;
+        // Filtramos: r[3] es la Columna D. Usamos trim() para evitar errores por espacios.
+        const turnosFiltrados = rows.filter((r, i) => {
+            if (i === 0) return false; // Saltamos encabezado
+            const fechaEnSheet = r[3] ? r[3].trim() : "";
+            return fechaEnSheet === hoy;
+        });
+
+        const turnosHoyCount = turnosFiltrados.length;
+
+        console.log(`[Stats] Slug: ${req.params.slug} | Hoy: ${hoy} | Encontrados: ${turnosHoyCount}`);
 
         res.json({
             stats: {
-                turnosHoy,
-                ingresosEstimados: turnosHoy * (user.precio || 5000),
+                turnosHoy: turnosHoyCount,
+                ingresosEstimados: turnosHoyCount * (user.precio || 5000),
                 businessName: user.business_name || user.slug
             }
         });
