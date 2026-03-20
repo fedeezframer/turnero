@@ -67,7 +67,6 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. ESTADÍSTICAS Y GRÁFICO POR SEMANAS
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -76,47 +75,46 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:C" // Leemos hasta la C que tiene el turno
+            range: "A:D" 
         });
         
         const rows = response.data.values || [];
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         
-        const diaHoyNum = ahora.getDate();
         const mesHoyNum = ahora.getMonth() + 1;
-        const mesHoyStr = String(mesHoyNum).padStart(2, '0');
-        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${mesHoyStr}`;
+        const diaHoyNum = ahora.getDate();
+        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesHoyNum).padStart(2, '0')}`;
 
         let turnosHoy = 0;
         let turnosMes = 0;
-        
-        // Estructura para el gráfico semanal
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             
-            const valorTurno = r[2].trim();
-            const fechaParte = valorTurno.split(" - ")[0]; // "DD/MM"
-            const [dia, mes] = fechaParte.split("/").map(Number);
+            // Limpiamos el valor de la celda por si tiene espacios o formatos raros
+            const valorTurno = r[2].trim(); 
+            const fechaParte = valorTurno.split(" - ")[0]; // Extrae "DD/MM"
+            const partes = fechaParte.split("/");
+            
+            if (partes.length >= 2) {
+                const dia = parseInt(partes[0]);
+                const mes = parseInt(partes[1]);
 
-            // Filtramos solo los del mes actual
-            if (mes === mesHoyNum) {
-                turnosMes++;
-                
-                // Lógica de agrupación semanal
-                if (dia <= 7) semanas["Sem 1"]++;
-                else if (dia <= 14) semanas["Sem 2"]++;
-                else if (dia <= 21) semanas["Sem 3"]++;
-                else semanas["Sem 4"]++;
-            }
+                if (mes === mesHoyNum) {
+                    turnosMes++;
+                    
+                    // Clasificación por semana
+                    if (dia <= 7) semanas["Sem 1"]++;
+                    else if (dia <= 14) semanas["Sem 2"]++;
+                    else if (dia <= 21) semanas["Sem 3"]++;
+                    else semanas["Sem 4"]++;
+                }
 
-            if (fechaParte === hoyString) {
-                turnosHoy++;
+                if (fechaParte === hoyString) turnosHoy++;
             }
         });
 
-        // Formateamos los datos para el componente de Framer
         const chartData = Object.keys(semanas).map(key => ({
             label: key,
             turnos: semanas[key]
@@ -124,8 +122,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         const ingresosMensuales = turnosMes * (user.precio || 5000);
         const promedioDiario = Math.round(ingresosMensuales / diaHoyNum);
-
-        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes}`);
 
         res.json({
             stats: {
@@ -138,7 +134,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             }
         });
     } catch (e) {
-        console.error("Error en stats:", e);
         res.status(500).json({ error: e.message });
     }
 });
