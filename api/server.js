@@ -14,6 +14,17 @@ app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// --- FUNCIÓN DE LIMPIEZA MÁGICA ---
+// Esta función agarra "reserva-user-fedeez" y devuelve "fedeez"
+const getCleanSlug = (rawSlug) => {
+    if (!rawSlug) return "";
+    return rawSlug
+        .replace("reserva-user-", "")
+        .replace("check-availability-", "")
+        .replace("/", "") // Por si viene con barra
+        .trim();
+};
+
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -25,14 +36,19 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. OBTENER OCUPADOS (Formato estricto DD/MM - HH:mm)
+// 1. OBTENER OCUPADOS (Ahora con limpieza)
 app.get("/get-occupied", async (req, res) => {
     try {
-        const { slug } = req.query; 
+        const slug = getCleanSlug(req.query.slug); // <--- LIMPIAMOS AQUÍ
+        
         if (!slug) return res.status(400).json({ error: "Falta el slug" });
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+        
+        if (!user) {
+            console.error(`Buscando: ${slug} (Original: ${req.query.slug}) - No encontrado.`);
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
 
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
@@ -54,41 +70,24 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Con normalización de hora HH:mm)
-// 2. CREAR RESERVA (Con limpieza de slug y normalización de hora)
+// 2. CREAR RESERVA (Ahora con limpieza)
 app.post("/create-booking", async (req, res) => {
     try {
-        let { name, phone, fecha, hora, slug } = req.body;
+        let { name, phone, fecha, hora, slug: rawSlug } = req.body;
+        const slug = getCleanSlug(rawSlug); // <--- LIMPIAMOS AQUÍ
 
-        // --- LIMPIEZA DE SLUG SEGURA ---
-        // Si el slug trae prefijos de Framer, los borramos
-        if (slug) {
-            slug = slug.replace("reserva-user-", "").replace("check-availability-", "").trim();
-        }
-
-        if (!slug) return res.status(400).json({ error: "Slug inválido" });
-
-        // Buscamos al usuario con el slug ya limpio
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        
-        if (!user) {
-            console.error(`Usuario no encontrado para el slug: ${slug}`);
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
         
-        // Normalizar Fecha DD/MM
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
-
-        // NORMALIZAR HORA HH:mm
         const [h, min] = hora.split(":");
         const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 
         const textoTurno = `${diaNorm}/${mesNorm} - ${horaNorm}`;
-        
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
@@ -100,19 +99,18 @@ app.post("/create-booking", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
-
         res.json({ success: true });
     } catch (e) {
-        console.error("Error en create-booking:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. LOGIN
+// 3. LOGIN (Limpia el slug por las dudas)
 app.post("/login", async (req, res) => {
     try {
-        const { slug, password } = req.body;
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug.trim()).single();
+        const slug = getCleanSlug(req.body.slug);
+        const { password } = req.body;
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         if (user && String(user.password) === String(password)) {
             return res.json({ success: true, slug: user.slug });
         }
@@ -122,10 +120,11 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS
+// 4. ADMIN STATS (Usa params, así que limpiamos el param)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
+        const slug = getCleanSlug(req.params.slug);
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "No user" });
 
         const sheets = await getSheets(user.sheet_id);
