@@ -21,7 +21,28 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. CREAR RESERVA (Sincronizado con tus componentes)
+// --- RUTA 1: LOGIN (LA QUE TE ESTÁ FALLANDO) ---
+app.post("/login", async (req, res) => {
+    const { slug, password } = req.body;
+    console.log("Intentando login para:", slug);
+    try {
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('slug, password')
+            .eq('slug', slug)
+            .eq('password', password)
+            .single();
+
+        if (error || !user) {
+            return res.status(401).json({ success: false, message: "Usuario o clave incorrectos" });
+        }
+        res.json({ success: true, slug: user.slug });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// --- RUTA 2: CREAR RESERVA ---
 app.post("/create-booking", async (req, res) => {
     const { name, phone, fecha, hora, slug } = req.body;
     try {
@@ -32,10 +53,7 @@ app.post("/create-booking", async (req, res) => {
         const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
         const sheetName = ss.data.sheets[0].properties.title;
 
-        // FORMATO PARA TUS COMPONENTES: "2026-03-19 - 15:30"
         const turnoFormateado = `${fecha} - ${hora}`;
-        
-        // FORMATO PARA EL DASHBOARD: "19/3/2026"
         const [y, m, d] = fecha.split("-");
         const hoyLimpio = `${parseInt(d)}/${parseInt(m)}/${y}`;
 
@@ -45,14 +63,13 @@ app.post("/create-booking", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone, turnoFormateado, hoyLimpio]] }
         });
-
         res.json({ status: "success" });
     } catch (e) {
         res.status(500).json({ message: e.message });
     }
 });
 
-// 2. CONSULTAR OCUPADOS (Para que el TimeSlots los oculte)
+// --- RUTA 3: CONSULTAR OCUPADOS ---
 app.get("/get-occupied", async (req, res) => {
     const { slug } = req.query;
     try {
@@ -65,47 +82,3 @@ app.get("/get-occupied", async (req, res) => {
             spreadsheetId: user.sheet_id,
             range: `${sheetName}!C:C`
         });
-        const occupied = (response.data.values || []).flat();
-        res.json({ ocupados: occupied });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 3. ADMIN STATS (Para el Dashboard)
-app.get("/admin-stats/:slug", async (req, res) => {
-    const { slug } = req.params;
-    try {
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        const sheets = await getSheets(user.sheet_id);
-        const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
-        const sheetName = ss.data.sheets[0].properties.title;
-
-        const response = await sheets.spreadsheets.values.get({ 
-            spreadsheetId: user.sheet_id, 
-            range: `${sheetName}!A:E` 
-        });
-        const rows = response.data.values || [];
-        const dataRows = rows.slice(1);
-
-        const ahora = new Date();
-        const opciones = { timeZone: 'America/Argentina/Buenos_Aires' };
-        const hoyLimpio = `${ahora.toLocaleDateString('es-AR', {...opciones, day:'numeric'})}/${ahora.toLocaleDateString('es-AR', {...opciones, month:'numeric'})}/${ahora.toLocaleDateString('es-AR', {...opciones, year:'numeric'})}`;
-
-        const turnosHoy = dataRows.filter(r => String(r[3] || "").trim().replace(/\./g, "") === hoyLimpio);
-
-        res.json({
-            stats: {
-                turnosHoy: turnosHoy.length,
-                totalTurnos: dataRows.length,
-                ingresosEstimados: turnosHoy.length * (user.precio || 10000),
-                nombreNegocio: user.business_name || user.slug
-            }
-        });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server ready`));
