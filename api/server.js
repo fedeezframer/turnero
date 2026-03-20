@@ -25,21 +25,37 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. LOGIN
-app.post("/login", async (req, res) => {
+// 1. OBTENER OCUPADOS (Lee todos los turnos DD/MM - HH:MM del Sheets)
+app.get("/get-occupied", async (req, res) => {
     try {
-        const { slug, password } = req.body;
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug.trim()).single();
-        if (user && String(user.password) === String(password)) {
-            return res.json({ success: true, slug: user.slug });
-        }
-        res.status(401).json({ success: false });
+        const { slug } = req.query; 
+        if (!slug) return res.status(400).json({ error: "Falta el parámetro slug" });
+
+        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
+        const sheets = await getSheets(user.sheet_id);
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "C:C", // Lee la columna donde están los turnos como "20/03 - 17:00"
+        });
+
+        const rows = response.data.values || [];
+        
+        // Limpiamos los datos para enviar solo los strings de los turnos
+        const ocupados = rows
+            .flat()
+            .filter(val => val && val.includes("-")) 
+            .map(val => val.trim());
+
+        console.log(`[Occupied] Enviando ${ocupados.length} turnos para ${slug}`);
+        res.json({ success: true, ocupados });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. CREAR RESERVA
+// 2. CREAR RESERVA (Guarda con formato DD/MM - HH:MM)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -50,7 +66,7 @@ app.post("/create-booking", async (req, res) => {
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
-        const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`;
+        const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`; // Formato que pediste: DD/MM - HH:MM
         
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
@@ -69,37 +85,21 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. OBTENER OCUPADOS (TODOS LOS TURNOS)
-app.get("/get-occupied", async (req, res) => {
+// 3. LOGIN
+app.post("/login", async (req, res) => {
     try {
-        const { slug } = req.query; 
-        if (!slug) return res.status(400).json({ error: "Falta el slug" });
-
-        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
-        const sheets = await getSheets(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: user.sheet_id,
-            range: "C:C", // Traemos toda la columna de turnos
-        });
-
-        const rows = response.data.values || [];
-        
-        // Limpiamos los datos: quitamos nulos y espacios
-        const ocupados = rows
-            .flat()
-            .filter(val => val && val.includes("-")) // Filtramos solo los que parecen turnos (DD/MM - HH:MM)
-            .map(val => val.trim());
-
-        console.log(`[Occupied] Enviando ${ocupados.length} turnos para ${slug}`);
-        res.json({ success: true, ocupados });
+        const { slug, password } = req.body;
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug.trim()).single();
+        if (user && String(user.password) === String(password)) {
+            return res.json({ success: true, slug: user.slug });
+        }
+        res.status(401).json({ success: false });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 4. ADMIN STATS
+// 4. ADMIN STATS (Para el dashboard de la imagen)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
