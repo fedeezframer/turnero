@@ -15,9 +15,8 @@ export async function getFullData() {
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
         
-        // Retornamos los datos limpios
         return rows.map(row => ({
-            turno: row.get("turno"), // Formato guardado: "19/03 - 15:30"
+            turno: row.get("turno"), 
             phone: row.get("phone"),
             name: row.get("name")
         }));
@@ -29,7 +28,6 @@ export async function getFullData() {
 
 export async function getOccupiedSlots() {
     const data = await getFullData();
-    // Filtramos solo los turnos que tengan valor
     return data.map(d => d.turno).filter(Boolean);
 }
 
@@ -40,18 +38,23 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // LÓGICA DE FORMATEO:
-        // data.fecha viene como "2026-03-19"
-        // data.hora viene como "15:30"
-        
+        // Formateo para la columna "turno" (ej: "19/03 - 15:30")
         const [year, month, day] = data.fecha.split("-");
         const turnoFormateado = `${day}/${month} - ${data.hora}`;
+
+        // --- FECHA LIMPIA PARA ESTADÍSTICAS (Columna semana) ---
+        const ahora = new Date();
+        const opciones = { timeZone: 'America/Argentina/Buenos_Aires' };
+        const d = ahora.toLocaleDateString('es-AR', { ...opciones, day: 'numeric' });
+        const m = ahora.toLocaleDateString('es-AR', { ...opciones, month: 'numeric' });
+        const a = ahora.toLocaleDateString('es-AR', { ...opciones, year: 'numeric' });
+        const fechaHoyLimpia = `${d}/${m}/${a}`; // Resultado: "19/3/2026"
 
         await sheet.addRow({
             name: data.name,
             phone: data.phone,
-            turno: turnoFormateado, // Guardamos "19/03 - 15:30"
-            semana: new Date().toLocaleDateString("es-AR") // Fecha de creación del registro
+            turno: turnoFormateado,
+            semana: fechaHoyLimpia 
         });
 
         return true;
