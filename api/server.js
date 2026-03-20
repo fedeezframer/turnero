@@ -21,7 +21,7 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. CREAR RESERVA
+// 1. CREAR RESERVA (Sincronizado con tus componentes)
 app.post("/create-booking", async (req, res) => {
     const { name, phone, fecha, hora, slug } = req.body;
     try {
@@ -29,13 +29,19 @@ app.post("/create-booking", async (req, res) => {
         if (!user) return res.status(404).json({ message: "Agenda no encontrada" });
 
         const sheets = await getSheets(user.sheet_id);
+        const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
+        const sheetName = ss.data.sheets[0].properties.title;
+
+        // FORMATO PARA TUS COMPONENTES: "2026-03-19 - 15:30"
+        const turnoFormateado = `${fecha} - ${hora}`;
+        
+        // FORMATO PARA EL DASHBOARD: "19/3/2026"
         const [y, m, d] = fecha.split("-");
-        const turnoFormateado = `${d}/${m} - ${hora}`;
-        const hoyLimpio = `${parseInt(d)}/${parseInt(m)}/${y}`; // Formato 19/3/2026 para el Dashboard
+        const hoyLimpio = `${parseInt(d)}/${parseInt(m)}/${y}`;
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
-            range: "Hoja 1!A:D",
+            range: `${sheetName}!A:D`,
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone, turnoFormateado, hoyLimpio]] }
         });
@@ -46,15 +52,18 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 2. CONSULTAR OCUPADOS
+// 2. CONSULTAR OCUPADOS (Para que el TimeSlots los oculte)
 app.get("/get-occupied", async (req, res) => {
     const { slug } = req.query;
     try {
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         const sheets = await getSheets(user.sheet_id);
+        const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
+        const sheetName = ss.data.sheets[0].properties.title;
+
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
-            range: "Hoja 1!C:C"
+            range: `${sheetName}!C:C`
         });
         const occupied = (response.data.values || []).flat();
         res.json({ ocupados: occupied });
@@ -63,21 +72,25 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 3. ADMIN STATS (El que arreglamos antes)
+// 3. ADMIN STATS (Para el Dashboard)
 app.get("/admin-stats/:slug", async (req, res) => {
     const { slug } = req.params;
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         const sheets = await getSheets(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "Hoja 1!A:E" });
+        const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
+        const sheetName = ss.data.sheets[0].properties.title;
+
+        const response = await sheets.spreadsheets.values.get({ 
+            spreadsheetId: user.sheet_id, 
+            range: `${sheetName}!A:E` 
+        });
         const rows = response.data.values || [];
         const dataRows = rows.slice(1);
 
         const ahora = new Date();
-        const d = ahora.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: 'numeric' });
-        const m = ahora.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', month: 'numeric' });
-        const y = ahora.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', year: 'numeric' });
-        const hoyLimpio = `${d}/${m}/${y}`;
+        const opciones = { timeZone: 'America/Argentina/Buenos_Aires' };
+        const hoyLimpio = `${ahora.toLocaleDateString('es-AR', {...opciones, day:'numeric'})}/${ahora.toLocaleDateString('es-AR', {...opciones, month:'numeric'})}/${ahora.toLocaleDateString('es-AR', {...opciones, year:'numeric'})}`;
 
         const turnosHoy = dataRows.filter(r => String(r[3] || "").trim().replace(/\./g, "") === hoyLimpio);
 
@@ -95,4 +108,4 @@ app.get("/admin-stats/:slug", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server ready`));
