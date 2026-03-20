@@ -78,7 +78,6 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. ESTADÍSTICAS (Compara Columna D con Fecha de Hoy)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -87,34 +86,47 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:D" 
+            range: "A:D" // Traemos todo para estar seguros
         });
         
         const rows = response.data.values || [];
         
-        // Fecha de hoy exacta en Argentina (DD/MM/YYYY)
-        const hoy = new Date().toLocaleDateString('es-AR', { 
-            day: '2-digit', 
-            month: '2-digit', 
-            year: 'numeric',
-            timeZone: 'America/Argentina/Buenos_Aires' 
+        // --- FECHAS ACTUALES (Buenos Aires) ---
+        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+        const diaHoy = String(ahora.getDate()).padStart(2, '0');
+        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0'); // Enero es 01
+        
+        const hoyString = `${diaHoy}/${mesHoy}`; // "20/03"
+
+        let turnosHoy = 0;
+        let turnosMes = 0;
+
+        rows.forEach((r, i) => {
+            if (i === 0 || !r[2]) return; // Saltamos encabezado y filas vacías en Columna C
+            
+            // r[2] es la Columna C: "31/03 - 15:30"
+            const valorTurno = r[2].trim(); 
+            const fechaParte = valorTurno.split(" - ")[0]; // "31/03"
+            const [dia, mes] = fechaParte.split("/");     // ["31", "03"]
+
+            // 1. ¿Es de hoy?
+            if (fechaParte === hoyString) {
+                turnosHoy++;
+            }
+
+            // 2. ¿Es de este mes?
+            if (mes === mesHoy) {
+                turnosMes++;
+            }
         });
 
-        // Filtramos: r[3] es la Columna D. Usamos trim() para evitar errores por espacios.
-        const turnosFiltrados = rows.filter((r, i) => {
-            if (i === 0) return false; // Saltamos encabezado
-            const fechaEnSheet = r[3] ? r[3].trim() : "";
-            return fechaEnSheet === hoy;
-        });
-
-        const turnosHoyCount = turnosFiltrados.length;
-
-        console.log(`[Stats] Slug: ${req.params.slug} | Hoy: ${hoy} | Encontrados: ${turnosHoyCount}`);
+        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes}`);
 
         res.json({
             stats: {
-                turnosHoy: turnosHoyCount,
-                ingresosEstimados: turnosHoyCount * (user.precio || 5000),
+                turnosHoy,
+                turnosMes,
+                ingresosEstimados: turnosHoy * (user.precio || 5000),
                 businessName: user.business_name || user.slug
             }
         });
