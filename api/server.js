@@ -55,11 +55,26 @@ app.get("/get-occupied", async (req, res) => {
 });
 
 // 2. CREAR RESERVA (Con normalización de hora HH:mm)
+// 2. CREAR RESERVA (Con limpieza de slug y normalización de hora)
 app.post("/create-booking", async (req, res) => {
     try {
-        const { name, phone, fecha, hora, slug } = req.body;
+        let { name, phone, fecha, hora, slug } = req.body;
+
+        // --- LIMPIEZA DE SLUG SEGURA ---
+        // Si el slug trae prefijos de Framer, los borramos
+        if (slug) {
+            slug = slug.replace("reserva-user-", "").replace("check-availability-", "").trim();
+        }
+
+        if (!slug) return res.status(400).json({ error: "Slug inválido" });
+
+        // Buscamos al usuario con el slug ya limpio
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+        
+        if (!user) {
+            console.error(`Usuario no encontrado para el slug: ${slug}`);
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
 
         const sheets = await getSheets(user.sheet_id);
         
@@ -68,7 +83,7 @@ app.post("/create-booking", async (req, res) => {
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
 
-        // NORMALIZAR HORA HH:mm (Clave para que el filtro funcione)
+        // NORMALIZAR HORA HH:mm
         const [h, min] = hora.split(":");
         const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 
@@ -85,8 +100,10 @@ app.post("/create-booking", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
+
         res.json({ success: true });
     } catch (e) {
+        console.error("Error en create-booking:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
