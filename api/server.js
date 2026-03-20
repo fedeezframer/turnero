@@ -5,7 +5,6 @@ import { google } from "googleapis";
 
 const app = express();
 
-// CONFIGURACIÓN DE SEGURIDAD TOTAL (CORS)
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST'],
@@ -40,7 +39,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Guarda la fecha de hoy en Columna D)
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -49,11 +48,9 @@ app.post("/create-booking", async (req, res) => {
 
         const sheets = await getSheets(user.sheet_id);
 
-        // Formato para columna C (Día del turno): "25/03 - 15:30"
         const [y, m, d] = fecha.split("-");
         const textoTurno = `${d}/${m} - ${hora}`;
 
-        // FECHA DE HOY REAL (Buenos Aires) para la Columna D
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit',
@@ -78,6 +75,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
+// 3. ESTADÍSTICAS ACTUALIZADAS (Hoy y Mes)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -86,47 +84,49 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:D" // Traemos todo para estar seguros
+            range: "A:D" 
         });
         
         const rows = response.data.values || [];
         
-        // --- FECHAS ACTUALES (Buenos Aires) ---
+        // Forzamos fecha de Buenos Aires
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const diaHoy = String(ahora.getDate()).padStart(2, '0');
-        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0'); // Enero es 01
+        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0'); 
         
-        const hoyString = `${diaHoy}/${mesHoy}`; // "20/03"
+        const hoyString = `${diaHoy}/${mesHoy}`; // Ejemplo: "20/03"
 
         let turnosHoy = 0;
         let turnosMes = 0;
 
         rows.forEach((r, i) => {
-            if (i === 0 || !r[2]) return; // Saltamos encabezado y filas vacías en Columna C
+            if (i === 0 || !r[2]) return; // Ignorar cabecera o celdas vacías en columna C
             
-            // r[2] es la Columna C: "31/03 - 15:30"
-            const valorTurno = r[2].trim(); 
-            const fechaParte = valorTurno.split(" - ")[0]; // "31/03"
-            const [dia, mes] = fechaParte.split("/");     // ["31", "03"]
+            const valorTurno = r[2].trim(); // "20/03 - 15:00"
+            const fechaParte = valorTurno.split(" - ")[0]; // "20/03"
+            const [dia, mes] = fechaParte.split("/"); 
 
-            // 1. ¿Es de hoy?
+            // Conteo diario
             if (fechaParte === hoyString) {
                 turnosHoy++;
             }
 
-            // 2. ¿Es de este mes?
+            // Conteo mensual
             if (mes === mesHoy) {
                 turnosMes++;
             }
         });
 
-        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes}`);
+        // CÁLCULO DE INGRESOS BASADO EN EL MES
+        const ingresosMensuales = turnosMes * (user.precio || 5000);
+
+        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes} | Ingresos: ${ingresosMensuales}`);
 
         res.json({
             stats: {
                 turnosHoy,
                 turnosMes,
-                ingresosEstimados: turnosHoy * (user.precio || 5000),
+                ingresosEstimados: ingresosMensuales, // Ahora devuelve lo del mes
                 businessName: user.business_name || user.slug
             }
         });
