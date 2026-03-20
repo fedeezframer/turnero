@@ -25,11 +25,11 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. OBTENER OCUPADOS (Lee todos los turnos DD/MM - HH:MM del Sheets)
+// 1. OBTENER OCUPADOS (Con filtro de formato estricto DD/MM - HH:MM)
 app.get("/get-occupied", async (req, res) => {
     try {
         const { slug } = req.query; 
-        if (!slug) return res.status(400).json({ error: "Falta el parámetro slug" });
+        if (!slug) return res.status(400).json({ error: "Falta el slug" });
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
@@ -37,25 +37,30 @@ app.get("/get-occupied", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
-            range: "C:C", // Lee la columna donde están los turnos como "20/03 - 17:00"
+            range: "C:C", 
         });
 
         const rows = response.data.values || [];
         
-        // Limpiamos los datos para enviar solo los strings de los turnos
+        // --- FILTRO INTELIGENTE ---
+        // Esta expresión regular solo acepta: numero/numero - numero:numero
+        // Ejemplo válido: "20/03 - 17:00"
+        // Ejemplo descartado: "28 - 16:00" o "2026-03-19..."
+        const formatoCorrecto = /^\d{2}\/\d{2} - \d{1,2}:\d{2}$/;
+
         const ocupados = rows
             .flat()
-            .filter(val => val && val.includes("-")) 
-            .map(val => val.trim());
+            .map(val => val ? val.trim() : "")
+            .filter(val => formatoCorrecto.test(val));
 
-        console.log(`[Occupied] Enviando ${ocupados.length} turnos para ${slug}`);
+        console.log(`[Occupied] Enviando ${ocupados.length} turnos válidos para ${slug}`);
         res.json({ success: true, ocupados });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. CREAR RESERVA (Guarda con formato DD/MM - HH:MM)
+// 2. CREAR RESERVA (Sigue guardando en formato DD/MM - HH:MM)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -66,7 +71,7 @@ app.post("/create-booking", async (req, res) => {
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
-        const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`; // Formato que pediste: DD/MM - HH:MM
+        const textoTurno = `${diaNorm}/${mesNorm} - ${hora}`;
         
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
@@ -99,7 +104,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Para el dashboard de la imagen)
+// 4. ADMIN STATS
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
