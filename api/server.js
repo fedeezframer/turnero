@@ -25,7 +25,6 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const { slug, password } = req.body;
@@ -39,7 +38,6 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -47,35 +45,25 @@ app.post("/create-booking", async (req, res) => {
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
-
         const [y, m, d] = fecha.split("-");
         const textoTurno = `${d}/${m} - ${hora}`;
-
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-            timeZone: 'America/Argentina/Buenos_Aires'
+            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
         });
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
             range: "A:D", 
             valueInputOption: "RAW",
-            requestBody: {
-                values: [[name, phone || "N/A", textoTurno, fechaHoyReal]]
-            }
+            requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
-
         res.json({ success: true });
     } catch (e) {
-        console.error("Error en booking:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. ESTADÍSTICAS ACTUALIZADAS (Hoy y Mes)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
@@ -88,50 +76,37 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const rows = response.data.values || [];
-        
-        // Forzamos fecha de Buenos Aires
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
-        const diaHoy = String(ahora.getDate()).padStart(2, '0');
-        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0'); 
-        
-        const hoyString = `${diaHoy}/${mesHoy}`; // Ejemplo: "20/03"
+        const diaHoyNum = ahora.getDate();
+        const mesHoy = String(ahora.getMonth() + 1).padStart(2, '0');
+        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${mesHoy}`;
 
         let turnosHoy = 0;
         let turnosMes = 0;
 
         rows.forEach((r, i) => {
-            if (i === 0 || !r[2]) return; // Ignorar cabecera o celdas vacías en columna C
-            
-            const valorTurno = r[2].trim(); // "20/03 - 15:00"
-            const fechaParte = valorTurno.split(" - ")[0]; // "20/03"
-            const [dia, mes] = fechaParte.split("/"); 
+            if (i === 0 || !r[2]) return;
+            const valorTurno = r[2].trim();
+            const fechaParte = valorTurno.split(" - ")[0];
+            const [dia, mes] = fechaParte.split("/");
 
-            // Conteo diario
-            if (fechaParte === hoyString) {
-                turnosHoy++;
-            }
-
-            // Conteo mensual
-            if (mes === mesHoy) {
-                turnosMes++;
-            }
+            if (fechaParte === hoyString) turnosHoy++;
+            if (mes === mesHoy) turnosMes++;
         });
 
-        // CÁLCULO DE INGRESOS BASADO EN EL MES
         const ingresosMensuales = turnosMes * (user.precio || 5000);
-
-        console.log(`[Stats] ${req.params.slug} | Hoy: ${turnosHoy} | Mes: ${turnosMes} | Ingresos: ${ingresosMensuales}`);
+        const promedioDiario = Math.round(ingresosMensuales / diaHoyNum);
 
         res.json({
             stats: {
                 turnosHoy,
                 turnosMes,
-                ingresosEstimados: ingresosMensuales, // Ahora devuelve lo del mes
+                ingresosEstimados: ingresosMensuales,
+                promedioDiario,
                 businessName: user.business_name || user.slug
             }
         });
     } catch (e) {
-        console.error("Error en stats:", e);
         res.status(500).json({ error: e.message });
     }
 });
