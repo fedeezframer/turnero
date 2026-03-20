@@ -7,8 +7,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Conexión a Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// Función para conectar con Google Sheets
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -17,36 +19,54 @@ async function getSheets(sheetId) {
         },
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-    return google.sheets({ version: "v4", auth: await auth.getClient() });
+    const client = await auth.getClient();
+    return google.sheets({ version: "v4", auth: client });
 }
 
-// LOGIN: Guarda el slug como llave maestra
+// --- RUTAS ---
+
+// 1. LOGIN: Verifica usuario y devuelve el SLUG
 app.post("/login", async (req, res) => {
-    const { slug, password } = req.body;
-    const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug.trim()).single();
-    if (user && String(user.password) === String(password)) {
-        return res.json({ success: true, slug: user.slug });
+    try {
+        const { slug, password } = req.body;
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('slug', slug.trim())
+            .single();
+
+        if (user && String(user.password) === String(password)) {
+            return res.json({ success: true, slug: user.slug });
+        }
+        res.status(401).json({ success: false, message: "Credenciales inválidas" });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
     }
-    res.status(401).json({ success: false });
 });
 
-// STATS: La lógica "vaga" para que siempre sume
+// 2. STATS: El motor que cuenta los turnos de hoy
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
         const sheets = await getSheets(user.sheet_id);
         const rows = (await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:C" // Leemos todo para no errarle
+            range: "A:C" // Leemos Columnas A (Nombre), B (Tel), C (Turno)
         })).data.values || [];
 
-        // Generamos fecha de hoy en dos formatos: "20/03" y "20/3"
-        const hoyFull = new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
-        const hoySimple = hoyFull.startsWith('0') ? hoyFull.substring(1) : hoyFull;
+        // Lógica de fecha flexible (Hoy es 20/03/2026)
+        const ahora = new Date();
+        const opciones = { day: '2-digit', month: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' };
+        const hoyFull = ahora.toLocaleDateString('es-AR', opciones); // "20/03"
+        const hoySimple = hoyFull.startsWith('0') ? hoyFull.substring(1) : hoyFull; // "20/3" (si fuera el caso)
 
-        const turnosHoy = rows.filter(r => {
-            const valor = String(r[2] || ""); // Columna C
-            return valor.includes(hoyFull) || valor.includes(hoySimple);
+        // Filtramos la Columna C (índice 2) que contenga la fecha de hoy
+        const turnosHoy = rows.filter((r, index) => {
+            if (index === 0) return false; // Ignorar encabezado
+            const valorCelda = String(r[2] || "");
+            return valorCelda.includes(hoyFull) || valorCelda.includes(hoySimple);
         }).length;
 
         res.json({
@@ -57,7 +77,34 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 businessName: user.business_name || user.slug
             }
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. BOOKING: Guarda el turno en el Sheets
+app.post("/create-booking", async (req, res) => {
+    try {
+        const { name, phone, fecha, hora, slug } = req.body;
+        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
+        
+        const sheets = await getSheets(user.sheet_id);
+        
+        // Formateamos para que el Sheets reciba "DD/MM - HH:mm"
+        const [y, m, d] = fecha.split("-");
+        const textoTurno = `${d}/${m} - ${hora}`;
+
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: user.sheet_id,
+            range: "A:C",
+            valueInputOption: "RAW",
+            requestBody: { values: [[name, phone, textoTurno]] }
+        });
+
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.listen(process.env.PORT || 10000);
