@@ -4,7 +4,12 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
+
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -20,20 +25,22 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. OBTENER OCUPADOS (Con Filtro Estricto)
+// 1. OBTENER OCUPADOS (Formato estricto DD/MM - HH:mm)
 app.get("/get-occupied", async (req, res) => {
     try {
-        const { slug } = req.query;
-        if (!slug) return res.status(400).json({ error: "Falta slug" });
+        const { slug } = req.query; 
+        if (!slug) return res.status(400).json({ error: "Falta el slug" });
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "C:C" });
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "C:C", 
+        });
+
         const rows = response.data.values || [];
-        
-        // Regex para DD/MM - HH:mm
         const formatoCorrecto = /^\d{2}\/\d{2} - \d{2}:\d{2}$/;
 
         const ocupados = rows
@@ -42,39 +49,110 @@ app.get("/get-occupied", async (req, res) => {
             .filter(val => formatoCorrecto.test(val));
 
         res.json({ success: true, ocupados });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-// 2. CREAR RESERVA (Normalizando horas a HH:mm)
+// 2. CREAR RESERVA (Con normalización de hora HH:mm)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
         const sheets = await getSheets(user.sheet_id);
+        
+        // Normalizar Fecha DD/MM
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
-        
-        // Normalizamos la hora (ej: "9:30" -> "09:30")
+
+        // NORMALIZAR HORA HH:mm (Clave para que el filtro funcione)
         const [h, min] = hora.split(":");
         const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-        
+
         const textoTurno = `${diaNorm}/${mesNorm} - ${horaNorm}`;
-        const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+        
+        const ahora = new Date();
+        const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
+            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
+        });
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
-            range: "A:D",
+            range: "A:D", 
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
         res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. LOGIN
+app.post("/login", async (req, res) => {
+    try {
+        const { slug, password } = req.body;
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug.trim()).single();
+        if (user && String(user.password) === String(password)) {
+            return res.json({ success: true, slug: user.slug });
+        }
+        res.status(401).json({ success: false });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 4. ADMIN STATS
+app.get("/admin-stats/:slug", async (req, res) => {
+    try {
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', req.params.slug).single();
+        if (!user) return res.status(404).json({ error: "No user" });
+
+        const sheets = await getSheets(user.sheet_id);
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "A:D" });
+        const rows = response.data.values || [];
+        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+        
+        const mesHoyNum = ahora.getMonth() + 1;
+        const diaHoyNum = ahora.getDate();
+        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesHoyNum).padStart(2, '0')}`;
+
+        let turnosHoy = 0, turnosMes = 0;
+        let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
+
+        rows.forEach((r, i) => {
+            if (i === 0 || !r[2]) return;
+            const valorTurno = r[2].trim(); 
+            const fechaParte = valorTurno.split(" - ")[0]; 
+            const partes = fechaParte.split("/");
+            if (partes.length >= 2) {
+                const dia = parseInt(partes[0]);
+                const mes = parseInt(partes[1]);
+                if (mes === mesHoyNum) {
+                    turnosMes++;
+                    if (dia <= 7) semanas["Sem 1"]++;
+                    else if (dia <= 14) semanas["Sem 2"]++;
+                    else if (dia <= 21) semanas["Sem 3"]++;
+                    else semanas["Sem 4"]++;
+                }
+                if (fechaParte === hoyString) turnosHoy++;
+            }
+        });
+
+        const ingresosMensuales = turnosMes * (user.precio || 5000);
+        res.json({
+            stats: {
+                turnosHoy, turnosMes,
+                ingresosEstimados: ingresosMensuales,
+                promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMensuales / diaHoyNum) : 0,
+                chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
+                businessName: user.business_name || user.slug
+            }
+        });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 3. LOGIN & STATS (Omitidos por brevedad, se mantienen igual que antes)
-app.post("/login", async (req, res) => { /* ... igual ... */ });
-app.get("/admin-stats/:slug", async (req, res) => { /* ... igual ... */ });
-
-app.listen(process.env.PORT || 10000);
+app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo"));
