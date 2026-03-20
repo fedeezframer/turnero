@@ -38,37 +38,33 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // 1. Formateo para la columna "turno" (Lo que ve el barbero: "25/03 - 14:00")
+        // 1. Formateo para la columna "turno" (Lo que ve el barbero)
         const [year, month, day] = data.fecha.split("-");
         const turnoFormateado = `${day}/${month} - ${data.hora}`;
 
-        // 2. FECHA Y HORA DE REGISTRO (Cuándo se hizo la reserva)
+        // 2. FECHA DE REGISTRO (Solo fecha para que coincida con el contador de Stats)
         const ahora = new Date();
-        const opcionesFecha = { 
-            timeZone: 'America/Argentina/Buenos_Aires', 
-            day: '2-digit', 
-            month: '2-digit', 
-            year: 'numeric' 
-        };
-        const opcionesHora = { 
-            timeZone: 'America/Argentina/Buenos_Aires', 
-            hour: '2-digit', 
-            minute: '2-digit', 
-            hour12: false 
-        };
-
-        const fechaRegistro = ahora.toLocaleDateString('es-AR', opcionesFecha); // "20/03/2026"
-        const horaRegistro = ahora.toLocaleTimeString('es-AR', opcionesHora);   // "11:15"
-        const registroCompleto = `${fechaRegistro} ${horaRegistro}`;
+        const fechaRegistro = ahora.toLocaleDateString('es-AR', {
+            timeZone: 'America/Argentina/Buenos_Aires',
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+        });
 
         // 3. GUARDAR EN EL SHEETS
-        // IMPORTANTE: Asegurate que en tu Excel la columna se llame "registro" o "fecha_registro"
         await sheet.addRow({
             name: data.name,
             phone: data.phone,
             turno: turnoFormateado,
-            semana: registroCompleto // Seguimos usando la columna 'semana' pero con data útil, o cambiala a 'registro' en el Excel
+            semana: fechaRegistro // <--- IMPORTANTE: Guardamos "20/03/2026"
         });
+
+        return true;
+    } catch (e) {
+        console.error("Error guardando en Sheets:", e.message);
+        return false;
+    }
+}
 
         return true;
     } catch (e) {
