@@ -7,8 +7,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Configuración de Supabase
 const supabase = createClient('https://xyhuzdtpjlmtadqamywu.supabase.co', process.env.SUPABASE_KEY);
 
+// Función para conectar con Google Sheets
 async function getSheets(sheetId) {
     const auth = new google.auth.GoogleAuth({
         credentials: {
@@ -21,27 +23,43 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. LOGIN
+// 1. RUTA LOGIN (CON LOGS DETALLADOS)
 app.post("/login", async (req, res) => {
-    const { slug, password } = req.body;
+    const slug = req.body.slug?.trim();
+    const password = req.body.password?.trim();
+
+    console.log(`--- Intento de Login ---`);
+    console.log(`Usuario: [${slug}]`);
+    console.log(`Password enviada: [${password}]`);
+
     try {
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('slug, password')
+            .select('*')
             .eq('slug', slug)
-            .eq('password', password)
             .single();
 
         if (error || !user) {
-            return res.status(401).json({ success: false, message: "Credenciales inválidas" });
+            console.log("❌ Resultado: Usuario no encontrado en la base de datos.");
+            return res.status(401).json({ success: false, message: "Usuario no encontrado" });
         }
+
+        // Comparación manual para evitar líos de tipos de datos
+        if (String(user.password).trim() !== String(password).trim()) {
+            console.log(`❌ Resultado: Contraseña incorrecta. (DB tiene: [${user.password}])`);
+            return res.status(401).json({ success: false, message: "Contraseña incorrecta" });
+        }
+
+        console.log("✅ Resultado: Login exitoso.");
         res.json({ success: true, slug: user.slug });
+
     } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
+        console.error("🔥 Error crítico en /login:", e.message);
+        res.status(500).json({ success: false, message: "Error interno del servidor" });
     }
 });
 
-// 2. CREAR RESERVA
+// 2. RUTA CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     const { name, phone, fecha, hora, slug } = req.body;
     try {
@@ -52,7 +70,9 @@ app.post("/create-booking", async (req, res) => {
         const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
         const sheetName = ss.data.sheets[0].properties.title;
 
+        // Formato para ocultar turnos: "2026-03-19 - 15:30"
         const turnoFormateado = `${fecha} - ${hora}`;
+        // Formato para el Dashboard: "19/3/2026"
         const [y, m, d] = fecha.split("-");
         const hoyLimpio = `${parseInt(d)}/${parseInt(m)}/${y}`;
 
@@ -68,7 +88,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. CONSULTAR OCUPADOS
+// 3. RUTA CONSULTAR OCUPADOS
 app.get("/get-occupied", async (req, res) => {
     const { slug } = req.query;
     try {
@@ -90,12 +110,12 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS
+// 4. RUTA ADMIN STATS (DASHBOARD)
 app.get("/admin-stats/:slug", async (req, res) => {
     const { slug } = req.params;
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "User not found" });
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
         const ss = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
@@ -130,9 +150,10 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
+// Ruta de salud
 app.get("/health", (req, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
 });
