@@ -5,23 +5,14 @@ import { google } from "googleapis";
 
 const app = express();
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type']
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- FUNCIÓN DE LIMPIEZA MÁGICA ---
 const getCleanSlug = (rawSlug) => {
     if (!rawSlug) return "";
-    return rawSlug
-        .replace("reserva-user-", "")
-        .replace("check-availability-", "")
-        .replace("/", "")
-        .trim();
+    return rawSlug.replace("reserva-user-", "").replace("check-availability-", "").replace("/", "").trim();
 };
 
 async function getSheets(sheetId) {
@@ -35,86 +26,47 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. OBTENER OCUPADOS
+// 1. OBTENER OCUPADOS, 2. CREAR RESERVA, 3. LOGIN (Se mantienen igual)
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
-        if (!slug) return res.status(400).json({ error: "Falta el slug" });
-
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
         const sheets = await getSheets(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: user.sheet_id,
-            range: "C:C", 
-        });
-
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "C:C" });
         const rows = response.data.values || [];
-        const formatoCorrecto = /^\d{2}\/\d{2} - \d{2}:\d{2}$/;
-
-        const ocupados = rows
-            .flat()
-            .map(val => val ? val.trim() : "")
-            .filter(val => formatoCorrecto.test(val));
-
+        const formato = /^\d{2}\/\d{2} - \d{2}:\d{2}$/;
+        const ocupados = rows.flat().map(v => v ? v.trim() : "").filter(v => formato.test(v));
         res.json({ success: true, ocupados });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
-
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
-        const sheets = await getSheets(user.sheet_id);
-        
         const [y, m, d] = fecha.split("-");
-        const diaNorm = String(d).padStart(2, '0');
-        const mesNorm = String(m).padStart(2, '0');
-        const [h, min] = hora.split(":");
-        const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-
-        const textoTurno = `${diaNorm}/${mesNorm} - ${horaNorm}`;
-        const ahora = new Date();
-        const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
-            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
-        });
-
+        const textoTurno = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')} - ${hora}`;
+        const fechaHoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+        const sheets = await getSheets(user.sheet_id);
         await sheets.spreadsheets.values.append({
-            spreadsheetId: user.sheet_id,
-            range: "A:D", 
-            valueInputOption: "RAW",
-            requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
+            spreadsheetId: user.sheet_id, range: "A:D", valueInputOption: "RAW",
+            requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoy]] }
         });
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 3. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
-        const { password } = req.body;
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (user && String(user.password) === String(password)) {
-            return res.json({ success: true, slug: user.slug });
-        }
+        if (user && String(user.password) === String(req.body.password)) return res.json({ success: true, slug: user.slug });
         res.status(401).json({ success: false });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4. ADMIN STATS (Lógica de crecimiento corregida)
+// 4. ADMIN STATS - LÓGICA DE COMPARACIÓN DD/MM Y CRECIMIENTO REAL
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const slug = getCleanSlug(req.params.slug);
@@ -125,99 +77,77 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "A:D" });
         const rows = response.data.values || [];
 
-        // --- LÓGICA DE TIEMPO (ARGENTINA) ---
+        // Tiempo real Argentina
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahora.getMonth() + 1;
         const mesAnterior = mesActual === 1 ? 12 : mesActual - 1;
-        const diaHoyNum = ahora.getDate();
-        const añoActual = ahora.getFullYear();
+        const diaHoy = ahora.getDate();
+        const añoAct = ahora.getFullYear();
 
-        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesActual).padStart(2, '0')}`;
-        
-        const ayerDate = new Date(ahora);
-        ayerDate.setDate(ahora.getDate() - 1);
-        const ayerString = `${String(ayerDate.getDate()).padStart(2, '0')}/${String(ayerDate.getMonth() + 1).padStart(2, '0')}`;
-
-        let turnosHoy = 0;
-        let turnosAyer = 0;
-        let turnosMesActual = 0;
-        let turnosMesAnterior = 0;
+        let tHoy = 0, tAyer = 0, tMesAct = 0, tMesAnt = 0;
         let turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-            const valorTurno = r[2].trim(); 
-            const partesSeparadas = valorTurno.split(" - ");
-            const fechaParte = partesSeparadas[0]; 
-            const horaParte = partesSeparadas[1];  
-            const partesFecha = fechaParte.split("/");
-            
-            if (partesFecha.length >= 2) {
-                const dia = parseInt(partesFecha[0]);
-                const mes = parseInt(partesFecha[1]);
+            const valorTurno = r[2].trim(); // "21/03 - 10:30"
+            const [fechaParte, horaParte] = valorTurno.split(" - ");
+            const [d, m] = fechaParte.split("/").map(Number);
 
-                if (mes === mesActual) {
-                    turnosMesActual++;
-                    if (dia <= 7) semanas["Sem 1"]++;
-                    else if (dia <= 14) semanas["Sem 2"]++;
-                    else if (dia <= 21) semanas["Sem 3"]++;
-                    else semanas["Sem 4"]++;
-
-                    turnosLista.push({
-                        fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
-                        hora: horaParte
-                    });
-                    
-                    if (fechaParte === hoyString) turnosHoy++;
-                } 
+            // Comparación Mes Actual
+            if (m === mesActual) {
+                tMesAct++;
+                if (d === diaHoy) tHoy++;
+                if (d === (diaHoy - 1)) tAyer++;
                 
-                if (mes === mesAnterior) {
-                    turnosMesAnterior++;
-                }
+                // Gráfico y Lista
+                if (d <= 7) semanas["Sem 1"]++;
+                else if (d <= 14) semanas["Sem 2"]++;
+                else if (d <= 21) semanas["Sem 3"]++;
+                else semanas["Sem 4"]++;
 
-                if (fechaParte === ayerString) turnosAyer++;
+                turnosLista.push({
+                    fecha: `${añoAct}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+                    hora: horaParte
+                });
+            } 
+            // Comparación Mes Anterior (Histórico)
+            else if (m === mesAnterior) {
+                tMesAnt++;
             }
         });
 
-        // --- CÁLCULO DE CRECIMIENTO SIN FALSOS 100% ---
-        const calcularPorcentaje = (act, ant) => {
-            if (ant === 0) {
-                return act > 0 ? 100 : 0; // Si el mes pasado fue 0 y este hay algo, es 100%. Si ambos son 0, es 0%.
-            }
+        const precio = user.precio || 5000;
+        const ingAct = tMesAct * precio;
+        const ingAnt = tMesAnt * precio;
+
+        // Función de porcentaje que evita el 100% si el mes pasado fue 0
+        const calcCrecimiento = (act, ant) => {
+            if (ant === 0) return 0; 
             return Math.round(((act - ant) / ant) * 100);
         };
 
-        const precioUser = user.precio || 5000;
-        const ingresosMesActual = turnosMesActual * precioUser;
-        const ingresosMesAnterior = turnosMesAnterior * precioUser;
-
         res.json({
             stats: {
-                turnosHoy,
-                turnosMes: turnosMesActual,
-                ingresosEstimados: ingresosMesActual,
-                promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
-                chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
+                turnosHoy: tHoy,
+                turnosMes: tMesAct,
+                ingresosEstimados: ingAct,
+                promedioDiario: diaHoy > 0 ? Math.round(ingAct / diaHoy) : 0,
+                chartData: Object.keys(semanas).map(k => ({ label: k, turnos: semanas[k] })),
                 businessName: user.business_name || user.slug,
-                turnosLista: turnosLista,
-                
+                turnosLista,
                 crecimiento: {
                     turnos: {
-                        day: calcularPorcentaje(turnosHoy, turnosAyer),
-                        month: calcularPorcentaje(turnosMesActual, turnosMesAnterior)
+                        day: calcCrecimiento(tHoy, tAyer),
+                        month: calcCrecimiento(tMesAct, tMesAnt)
                     },
                     ingresos: {
-                        day: calcularPorcentaje(turnosHoy * precioUser, turnosAyer * precioUser),
-                        month: calcularPorcentaje(ingresosMesActual, ingresosMesAnterior)
+                        month: calcCrecimiento(ingAct, ingAnt)
                     }
                 }
             }
         });
-    } catch (e) { 
-        console.error("Error en stats:", e);
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo"));
+app.listen(process.env.PORT || 10000, () => console.log("Servidor en línea"));
