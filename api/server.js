@@ -14,7 +14,11 @@ app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- FUNCIÓN DE LIMPIEZA MÁGICA ---
+// --- SISTEMA DE CACHÉ EN MEMORIA ---
+// Guardamos la data por slug para no saturar Google Sheets
+const globalCache = {}; 
+const CACHE_DURATION = 30000; // 30 segundos de vida para la data
+
 const getCleanSlug = (rawSlug) => {
     if (!rawSlug) return "";
     return rawSlug
@@ -24,7 +28,7 @@ const getCleanSlug = (rawSlug) => {
         .trim();
 };
 
-async function getSheets(sheetId) {
+async function getSheets() {
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -32,10 +36,11 @@ async function getSheets(sheetId) {
         },
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-    return google.sheets({ version: "v4", auth: await auth.getClient() });
+    const client = await auth.getClient();
+    return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. OBTENER OCUPADOS
+// 1. OBTENER OCUPADOS (Con caché simple)
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
@@ -44,7 +49,7 @@ app.get("/get-occupied", async (req, res) => {
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-        const sheets = await getSheets(user.sheet_id);
+        const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
             range: "C:C", 
@@ -64,7 +69,7 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA
+// 2. CREAR RESERVA (Limpia la caché al crear una nueva)
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -73,7 +78,7 @@ app.post("/create-booking", async (req, res) => {
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-        const sheets = await getSheets(user.sheet_id);
+        const sheets = await getSheets();
         
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
@@ -93,13 +98,18 @@ app.post("/create-booking", async (req, res) => {
             valueInputOption: "RAW",
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
+
+        // IMPORTANTE: Al crear reserva, invalidamos la caché de este slug 
+        // para que el dashboard muestre el cambio de inmediato
+        delete globalCache[slug];
+
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. LOGIN
+// 3. LOGIN (Sin cambios)
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -114,21 +124,32 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Lógica Simplificada y Directa)
+// 4. ADMIN STATS (Con sistema de Caché por Usuario)
 app.get("/admin-stats/:slug", async (req, res) => {
+    const slug = getCleanSlug(req.params.slug);
+    const now = Date.now();
+
+    // Verificamos si tenemos data reciente para este slug
+    if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
+        console.log(`>>> Sirviendo desde CACHÉ para: ${slug}`);
+        return res.json(globalCache[slug].data);
+    }
+
     try {
-        const slug = getCleanSlug(req.params.slug);
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "No user" });
 
-        const sheets = await getSheets(user.sheet_id);
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "A:D" });
+        const sheets = await getSheets();
+        const response = await sheets.spreadsheets.values.get({ 
+            spreadsheetId: user.sheet_id, 
+            range: "A:D" 
+        });
+        
         const rows = response.data.values || [];
-
-        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
-        const mesActual = ahora.getMonth() + 1;
-        const diaHoyNum = ahora.getDate();
-        const añoActual = ahora.getFullYear();
+        const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+        const mesActual = ahoraArg.getMonth() + 1;
+        const diaHoyNum = ahoraArg.getDate();
+        const añoActual = ahoraArg.getFullYear();
 
         let turnosHoy = 0;
         let turnosMesActual = 0;
@@ -139,6 +160,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
             if (i === 0 || !r[2]) return;
             const valorTurno = r[2].trim(); 
             const [fechaParte, horaParte] = valorTurno.split(" - ");
+            if(!fechaParte) return;
             const [dia, mes] = fechaParte.split("/").map(Number);
 
             if (mes === mesActual) {
@@ -152,7 +174,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
                 turnosLista.push({
                     fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
-                    hora: horaParte
+                    hora: horaParte || "00:00"
                 });
             }
         });
@@ -160,7 +182,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const precioUser = user.precio || 5000;
         const ingresosMesActual = turnosMesActual * precioUser;
 
-        res.json({
+        const finalData = {
             stats: {
                 turnosHoy,
                 turnosMes: turnosMesActual,
@@ -170,11 +192,22 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 businessName: user.business_name || user.slug,
                 turnosLista: turnosLista
             }
-        });
+        };
+
+        // Guardamos en caché antes de responder
+        globalCache[slug] = {
+            timestamp: now,
+            data: finalData
+        };
+
+        res.json(finalData);
+
     } catch (e) { 
         console.error("Error en stats:", e);
+        // Si falla (ej. por cuota), intentamos devolver la caché vieja aunque haya expirado
+        if (globalCache[slug]) return res.json(globalCache[slug].data);
         res.status(500).json({ error: e.message }); 
     }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo"));
+app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo con Caché Activa"));
