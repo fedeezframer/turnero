@@ -15,13 +15,12 @@ app.use(express.json());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // --- FUNCIÓN DE LIMPIEZA MÁGICA ---
-// Esta función agarra "reserva-user-fedeez" y devuelve "fedeez"
 const getCleanSlug = (rawSlug) => {
     if (!rawSlug) return "";
     return rawSlug
         .replace("reserva-user-", "")
         .replace("check-availability-", "")
-        .replace("/", "") // Por si viene con barra
+        .replace("/", "")
         .trim();
 };
 
@@ -36,19 +35,14 @@ async function getSheets(sheetId) {
     return google.sheets({ version: "v4", auth: await auth.getClient() });
 }
 
-// 1. OBTENER OCUPADOS (Ahora con limpieza)
+// 1. OBTENER OCUPADOS
 app.get("/get-occupied", async (req, res) => {
     try {
-        const slug = getCleanSlug(req.query.slug); // <--- LIMPIAMOS AQUÍ
-        
+        const slug = getCleanSlug(req.query.slug);
         if (!slug) return res.status(400).json({ error: "Falta el slug" });
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        
-        if (!user) {
-            console.error(`Buscando: ${slug} (Original: ${req.query.slug}) - No encontrado.`);
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({
@@ -70,11 +64,11 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Ahora con limpieza)
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
-        const slug = getCleanSlug(rawSlug); // <--- LIMPIAMOS AQUÍ
+        const slug = getCleanSlug(rawSlug);
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
@@ -105,7 +99,7 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 3. LOGIN (Limpia el slug por las dudas)
+// 3. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -120,7 +114,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Usa params, así que limpiamos el param)
+// 4. ADMIN STATS (Lógica de crecimiento y tiempo real)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const slug = getCleanSlug(req.params.slug);
@@ -130,45 +124,105 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets(user.sheet_id);
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: user.sheet_id, range: "A:D" });
         const rows = response.data.values || [];
-        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
-        
-        const mesHoyNum = ahora.getMonth() + 1;
-        const diaHoyNum = ahora.getDate();
-        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesHoyNum).padStart(2, '0')}`;
 
-        let turnosHoy = 0, turnosMes = 0;
+        // --- LÓGICA DE TIEMPO (ARGENTINA) ---
+        const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+        const mesActual = ahora.getMonth() + 1;
+        const mesAnterior = mesActual === 1 ? 12 : mesActual - 1;
+        const diaHoyNum = ahora.getDate();
+        const añoActual = ahora.getFullYear();
+
+        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesActual).padStart(2, '0')}`;
+        
+        // Ayer (para el crecimiento diario)
+        const ayerDate = new Date(ahora);
+        ayerDate.setDate(ahora.getDate() - 1);
+        const ayerString = `${String(ayerDate.getDate()).padStart(2, '0')}/${String(ayerDate.getMonth() + 1).padStart(2, '0')}`;
+
+        let turnosHoy = 0;
+        let turnosAyer = 0;
+        let turnosMesActual = 0;
+        let turnosMesAnterior = 0;
+        let turnosLista = []; // Para el componente de horas trabajadas en Framer
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             const valorTurno = r[2].trim(); 
-            const fechaParte = valorTurno.split(" - ")[0]; 
-            const partes = fechaParte.split("/");
-            if (partes.length >= 2) {
-                const dia = parseInt(partes[0]);
-                const mes = parseInt(partes[1]);
-                if (mes === mesHoyNum) {
-                    turnosMes++;
+            const partesSeparadas = valorTurno.split(" - ");
+            const fechaParte = partesSeparadas[0]; // "21/03"
+            const horaParte = partesSeparadas[1];  // "10:30"
+            const partesFecha = fechaParte.split("/");
+            
+            if (partesFecha.length >= 2) {
+                const dia = parseInt(partesFecha[0]);
+                const mes = parseInt(partesFecha[1]);
+
+                // Filtro para Mes Actual
+                if (mes === mesActual) {
+                    turnosMesActual++;
+                    
+                    // Llenamos las semanas para el gráfico
                     if (dia <= 7) semanas["Sem 1"]++;
                     else if (dia <= 14) semanas["Sem 2"]++;
                     else if (dia <= 21) semanas["Sem 3"]++;
                     else semanas["Sem 4"]++;
+
+                    // Agregamos a la lista para el componente de horas
+                    turnosLista.push({
+                        fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
+                        hora: horaParte
+                    });
+                } 
+                
+                // Filtro para Mes Anterior (Comparativa)
+                if (mes === mesAnterior) {
+                    turnosMesAnterior++;
                 }
+
+                // Filtro para Hoy y Ayer
                 if (fechaParte === hoyString) turnosHoy++;
+                if (fechaParte === ayerString) turnosAyer++;
             }
         });
 
-        const ingresosMensuales = turnosMes * (user.precio || 5000);
+        // --- CÁLCULO DE CRECIMIENTO ---
+        const calcularPorcentaje = (act, ant) => {
+            if (ant === 0) return act > 0 ? 100 : 0;
+            return Math.round(((act - ant) / ant) * 100);
+        };
+
+        const precioUser = user.precio || 5000;
+        const ingresosMesActual = turnosMesActual * precioUser;
+        const ingresosMesAnterior = turnosMesAnterior * precioUser;
+
         res.json({
             stats: {
-                turnosHoy, turnosMes,
-                ingresosEstimados: ingresosMensuales,
-                promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMensuales / diaHoyNum) : 0,
+                turnosHoy,
+                turnosMes: turnosMesActual,
+                ingresosEstimados: ingresosMesActual,
+                promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
-                businessName: user.business_name || user.slug
+                businessName: user.business_name || user.slug,
+                turnosLista: turnosLista, // Enviamos la lista cruda para que Framer calcule horas pasadas
+                
+                // Objeto para el GrowthBadge
+                crecimiento: {
+                    turnos: {
+                        day: calcularPorcentaje(turnosHoy, turnosAyer),
+                        month: calcularPorcentaje(turnosMesActual, turnosMesAnterior)
+                    },
+                    ingresos: {
+                        day: calcularPorcentaje(turnosHoy * precioUser, turnosAyer * precioUser),
+                        month: calcularPorcentaje(ingresosMesActual, ingresosMesAnterior)
+                    }
+                }
             }
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        console.error("Error en stats:", e);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo"));
