@@ -84,7 +84,7 @@ app.post("/create-booking", async (req, res) => {
         const textoTurno = `${diaNorm}/${mesNorm} - ${horaNorm}`;
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
-            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_ Aires'
+            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
         });
 
         await sheets.spreadsheets.values.append({
@@ -114,7 +114,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Lógica de comparación histórica real)
+// 4. ADMIN STATS (Lógica Simplificada y Directa)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const slug = getCleanSlug(req.params.slug);
@@ -127,31 +127,23 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         const ahora = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahora.getMonth() + 1;
-        const mesAnterior = mesActual === 1 ? 12 : mesActual - 1;
         const diaHoyNum = ahora.getDate();
         const añoActual = ahora.getFullYear();
 
-        const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesActual).padStart(2, '0')}`;
-        
         let turnosHoy = 0;
-        let turnosAyer = 0;
         let turnosMesActual = 0;
-        let turnosMesAnterior = 0;
         let turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             const valorTurno = r[2].trim(); 
-            const partesSeparadas = valorTurno.split(" - ");
-            const fechaParte = partesSeparadas[0]; // "DD/MM"
-            const horaParte = partesSeparadas[1];  
+            const [fechaParte, horaParte] = valorTurno.split(" - ");
             const [dia, mes] = fechaParte.split("/").map(Number);
 
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
-                if (dia === (diaHoyNum - 1)) turnosAyer++;
 
                 if (dia <= 7) semanas["Sem 1"]++;
                 else if (dia <= 14) semanas["Sem 2"]++;
@@ -162,19 +154,11 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
                     hora: horaParte
                 });
-            } else if (mes === mesAnterior) {
-                turnosMesAnterior++;
             }
         });
 
-        const calcularPorcentaje = (act, ant) => {
-            if (ant === 0) return act > 0 ? 100 : 0;
-            return Math.round(((act - ant) / ant) * 100);
-        };
-
         const precioUser = user.precio || 5000;
         const ingresosMesActual = turnosMesActual * precioUser;
-        const ingresosMesAnterior = turnosMesAnterior * precioUser;
 
         res.json({
             stats: {
@@ -184,16 +168,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                turnosLista: turnosLista,
-                crecimiento: {
-                    turnos: {
-                        day: calcularPorcentaje(turnosHoy, turnosAyer),
-                        month: calcularPorcentaje(turnosMesActual, turnosMesAnterior)
-                    },
-                    ingresos: {
-                        month: calcularPorcentaje(ingresosMesActual, ingresosMesAnterior)
-                    }
-                }
+                turnosLista: turnosLista
             }
         });
     } catch (e) { 
