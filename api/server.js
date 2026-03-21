@@ -114,7 +114,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Lógica de crecimiento y tiempo real)
+// 4. ADMIN STATS (Lógica de crecimiento corregida)
 app.get("/admin-stats/:slug", async (req, res) => {
     try {
         const slug = getCleanSlug(req.params.slug);
@@ -134,7 +134,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         const hoyString = `${String(diaHoyNum).padStart(2, '0')}/${String(mesActual).padStart(2, '0')}`;
         
-        // Ayer (para el crecimiento diario)
         const ayerDate = new Date(ahora);
         ayerDate.setDate(ahora.getDate() - 1);
         const ayerString = `${String(ayerDate.getDate()).padStart(2, '0')}/${String(ayerDate.getMonth() + 1).padStart(2, '0')}`;
@@ -143,52 +142,49 @@ app.get("/admin-stats/:slug", async (req, res) => {
         let turnosAyer = 0;
         let turnosMesActual = 0;
         let turnosMesAnterior = 0;
-        let turnosLista = []; // Para el componente de horas trabajadas en Framer
+        let turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             const valorTurno = r[2].trim(); 
             const partesSeparadas = valorTurno.split(" - ");
-            const fechaParte = partesSeparadas[0]; // "21/03"
-            const horaParte = partesSeparadas[1];  // "10:30"
+            const fechaParte = partesSeparadas[0]; 
+            const horaParte = partesSeparadas[1];  
             const partesFecha = fechaParte.split("/");
             
             if (partesFecha.length >= 2) {
                 const dia = parseInt(partesFecha[0]);
                 const mes = parseInt(partesFecha[1]);
 
-                // Filtro para Mes Actual
                 if (mes === mesActual) {
                     turnosMesActual++;
-                    
-                    // Llenamos las semanas para el gráfico
                     if (dia <= 7) semanas["Sem 1"]++;
                     else if (dia <= 14) semanas["Sem 2"]++;
                     else if (dia <= 21) semanas["Sem 3"]++;
                     else semanas["Sem 4"]++;
 
-                    // Agregamos a la lista para el componente de horas
                     turnosLista.push({
                         fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
                         hora: horaParte
                     });
+                    
+                    if (fechaParte === hoyString) turnosHoy++;
                 } 
                 
-                // Filtro para Mes Anterior (Comparativa)
                 if (mes === mesAnterior) {
                     turnosMesAnterior++;
                 }
 
-                // Filtro para Hoy y Ayer
-                if (fechaParte === hoyString) turnosHoy++;
                 if (fechaParte === ayerString) turnosAyer++;
             }
         });
 
-        // --- CÁLCULO DE CRECIMIENTO ---
+        // --- CÁLCULO DE CRECIMIENTO SIN FALSOS 100% ---
         const calcularPorcentaje = (act, ant) => {
-            if (ant === 0) return act > 0 ? 100 : 0;
+            if (ant === 0) {
+                return act > 0 ? 100 : 0; // Si el mes pasado fue 0 y este hay algo, es 100%. Si ambos son 0, es 0%.
+            }
             return Math.round(((act - ant) / ant) * 100);
         };
 
@@ -204,9 +200,8 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                turnosLista: turnosLista, // Enviamos la lista cruda para que Framer calcule horas pasadas
+                turnosLista: turnosLista,
                 
-                // Objeto para el GrowthBadge
                 crecimiento: {
                     turnos: {
                         day: calcularPorcentaje(turnosHoy, turnosAyer),
