@@ -305,6 +305,7 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
+// 6. REGISTRO AUTOMÁTICO (FIX DE PERMISOS Y CARPETAS)
 app.post("/register", async (req, res) => {
     try {
         const { usuario, email, business_name, password, precio } = req.body;
@@ -314,33 +315,39 @@ app.post("/register", async (req, res) => {
 
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
-        const sheets = google.sheets({ version: "v4", auth });
 
-        console.log("Creando planilla nueva desde cero...");
-        
-        // PASO 1: Crear una planilla vacía directamente en TU carpeta
-        const createResponse = await drive.files.create({
+        console.log("Clonando planilla maestra en carpeta compartida...");
+
+        // USAMOS drive.files.copy que es más directo que crear y copiar hojas
+        const copyResponse = await drive.files.copy({
+            fileId: MASTER_SHEET_ID,
+            // ESTAS DOS LÍNEAS SON CLAVE PARA EL ERROR DE PERMISOS
+            supportsAllDrives: true, 
+            includeItemsFromAllDrives: true,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
-                mimeType: 'application/vnd.google-apps.spreadsheet',
-                parents: ["1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"] // Tu FOLDER_ID
+                parents: ["1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"] 
             }
         });
 
-        const newSheetId = createResponse.data.id;
+        const newSheetId = copyResponse.data.id;
 
-        // PASO 2: Copiar las hojas de la MAESTRA a la NUEVA
-        // Esto suele saltarse el chequeo de cuota de almacenamiento de archivos
-        console.log("Copiando estructura de maestra...");
-        await sheets.spreadsheets.sheets.copyTo({
-            spreadsheetId: MASTER_SHEET_ID,
-            sheetId: 0, // ID de la pestaña (normalmente 0 es la primera)
-            requestBody: {
-                destinationSpreadsheetId: newSheetId
-            }
-        });
+        // Intentamos transferir propiedad (si falla no corta el proceso)
+        try {
+            await drive.permissions.create({
+                fileId: newSheetId,
+                transferOwnership: true,
+                supportsAllDrives: true,
+                requestBody: {
+                    role: 'owner',
+                    type: 'user',
+                    emailAddress: 'TU_MAIL_PERSONAL@gmail.com' // REEMPLAZA CON TU MAIL
+                }
+            });
+        } catch (e) {
+            console.log("Nota: No se transfirió propiedad pero el archivo se creó.");
+        }
 
-        // PASO 3: Guardar en Supabase
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email,
