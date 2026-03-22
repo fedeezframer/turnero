@@ -298,11 +298,12 @@ app.post("/cancel-appointment", async (req, res) => {
 });
 
 app.post("/register", async (req, res) => {
+    console.log("Datos recibidos:", req.body);
     try {
         const { usuario, email, business_name, password, precio } = req.body;
 
         if (!usuario || !password || !email) {
-            return res.status(400).json({ error: "Faltan datos (usuario, email y contraseña)." });
+            return res.status(400).json({ error: "Faltan datos obligatorios (usuario, email o contraseña)." });
         }
 
         const cleanSlug = usuario.toLowerCase().trim()
@@ -310,13 +311,14 @@ app.post("/register", async (req, res) => {
             .replace(/\s+/g, '-') 
             .replace(/[^a-z0-9-]/g, ''); 
 
+        // Verificar si ya existe
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
-        if (existingUser) return res.status(400).json({ success: false, error: "Ese usuario ya está tomado." });
+        if (existingUser) return res.status(400).json({ success: false, error: "Ese nombre de usuario ya existe." });
 
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        // DUPLICAR PLANILLA (Usando Drive API v3 que es la forma correcta)
+        // DUPLICAR PLANILLA
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
@@ -326,7 +328,7 @@ app.post("/register", async (req, res) => {
 
         const newSheetId = copyResponse.data.id;
 
-        // INSERT EN SUPABASE (Asegurate que los nombres de columnas coincidan con tu SQL)
+        // INSERT EN SUPABASE
         const { error } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email: email,
