@@ -263,4 +263,48 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con Filtro Temporal"));
+// ... (Todo el inicio del código, imports y configuración igual) ...
+
+// 6. NUEVA RUTA: REGISTRO DE USUARIOS
+app.post("/register", async (req, res) => {
+    try {
+        const { slug, business_name, password, sheet_id, precio } = req.body;
+
+        // Limpieza básica del slug por si el usuario pone espacios
+        const cleanSlug = slug.toLowerCase().trim().replace(/\s+/g, '-');
+
+        // 1. Verificamos si el slug ya existe para no pisar a otro barbero
+        const { data: existingUser } = await supabase
+            .from('usuarios')
+            .select('slug')
+            .eq('slug', cleanSlug)
+            .single();
+
+        if (existingUser) {
+            return res.status(400).json({ success: false, error: "Este nombre de usuario (slug) ya existe." });
+        }
+
+        // 2. Insertamos el nuevo barbero en la tabla
+        const { error } = await supabase
+            .from('usuarios')
+            .insert([
+                { 
+                    slug: cleanSlug, 
+                    business_name, 
+                    password, 
+                    sheet_id, 
+                    precio: parseInt(precio) || 5000 
+                }
+            ]);
+
+        if (error) throw error;
+
+        res.json({ success: true, message: "¡Registro exitoso!", slug: cleanSlug });
+
+    } catch (e) {
+        console.error("Error en registro:", e);
+        res.status(500).json({ error: "Error al crear la cuenta. Revisa los datos." });
+    }
+});
+
+app.listen(process.env.PORT || 10000, () => console.log("Servidor Online - Turnero Pro"));
