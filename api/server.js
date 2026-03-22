@@ -5,6 +5,9 @@ import { google } from "googleapis";
 
 const app = express();
 
+// --- CONFIGURACIÓN GLOBAL ---
+const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
+
 // --- CONFIGURACIÓN MIDDLEWARE ---
 app.use(cors({
     origin: '*',
@@ -36,7 +39,10 @@ async function getSheets() {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
             private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
         },
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+        scopes: [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.file" // Necesario para duplicar archivos
+        ],
     });
     const client = await auth.getClient();
     return google.sheets({ version: "v4", auth: client });
@@ -86,34 +92,27 @@ app.post("/create-booking", async (req, res) => {
 
         const sheets = await getSheets();
         
-        // Normalización de la fecha entrante (YYYY-MM-DD -> DD/MM)
         const [y, m, d] = fecha.split("-");
         const diaMesFormulario = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}`;
         const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
 
-        // --- FILTRO ANTI-DUPLICADOS BLINDADO ---
         const checkResponse = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
             range: "A:C",
         });
 
         const rows = checkResponse.data.values || [];
-        
-        // Limpiamos el teléfono entrante (solo números) para comparar
         const phoneCleanInput = phone.toString().trim().replace(/\D/g, '');
 
         const yaTieneTurno = rows.some(row => {
             if (!row[0] || !row[1] || !row[2]) return false;
-
             const nombreEnSheet = row[0].toString().trim().toLowerCase();
             const telEnSheet = row[1].toString().trim().replace(/\D/g, '');
             const turnoEnSheet = row[2].toString().trim();
 
-            const nombreMatch = nombreEnSheet === name.trim().toLowerCase();
-            const telMatch = telEnSheet === phoneCleanInput;
-            const fechaMatch = turnoEnSheet.includes(diaMesFormulario);
-            
-            return nombreMatch && telMatch && fechaMatch;
+            return nombreEnSheet === name.trim().toLowerCase() && 
+                   telEnSheet === phoneCleanInput && 
+                   turnoEnSheet.includes(diaMesFormulario);
         });
 
         if (yaTieneTurno) {
@@ -122,7 +121,6 @@ app.post("/create-booking", async (req, res) => {
                 error: `Ya tenés un turno agendado para el día ${diaMesFormulario}.` 
             });
         }
-        // --- FIN FILTRO ANTI-DUPLICADOS ---
 
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
@@ -196,12 +194,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-
-            const nombreCliente = (r[0] || "Cliente").toString().trim(); 
-            const telefonoCliente = (r[1] || "").toString().trim();
-            const valorTurno = r[2].toString().trim(); 
-            
-            const partes = valorTurno.split(" - ");
+            const partes = r[2].toString().trim().split(" - ");
             if (partes.length < 2) return;
 
             const [fechaParte, horaParte] = partes;
@@ -221,11 +214,11 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
             if (fechaTurnoUnix > (horaActualUnix - 900000)) {
                 turnosLista.push({
-                    nombre: nombreCliente,
-                    telefono: telefonoCliente,
-                    fecha: añoActual + "-" + String(mes).padStart(2, '0') + "-" + String(dia).padStart(2, '0'),
-                    hora: horaParte || "00:00",
-                    rawTurno: valorTurno
+                    nombre: r[0],
+                    telefono: r[1],
+                    fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
+                    hora: horaParte,
+                    rawTurno: r[2]
                 });
             }
         });
@@ -299,15 +292,11 @@ app.post("/cancel-appointment", async (req, res) => {
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) {
-        console.error("Error al cancelar:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 6. REGISTRO
-// Agregá esta constante arriba de todo con el ID de tu Sheet vacío
-const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-
+// 6. REGISTRO AUTOMÁTICO
 app.post("/register", async (req, res) => {
     try {
         const { usuario, business_name, password, precio } = req.body;
@@ -316,22 +305,19 @@ app.post("/register", async (req, res) => {
             return res.status(400).json({ error: "Faltan datos (usuario y contraseña)." });
         }
 
-        // 1. Limpiamos el slug (minúsculas, sin espacios, sin caracteres raros)
         const cleanSlug = usuario.toLowerCase().trim()
-            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Quita acentos
-            .replace(/\s+/g, '-') // Espacios por guiones
-            .replace(/[^a-z0-9-]/g, ''); // Quita todo lo que no sea letra, número o guion
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
+            .replace(/\s+/g, '-') 
+            .replace(/[^a-z0-9-]/g, ''); 
 
-        // 2. Verificar si el usuario ya existe en Supabase
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
         if (existingUser) {
-            return res.status(400).json({ success: false, error: "Ese usuario ya está tomado. Elegí otro." });
+            return res.status(400).json({ success: false, error: "Ese usuario ya está tomado." });
         }
 
         const sheets = await getSheets();
 
-        // 3. AUTOMATIZACIÓN: Duplicar la Planilla Maestra
-        // Esto crea una copia exacta en el Google Drive de la Service Account
+        // Duplicar la Planilla Maestra
         const copyResponse = await sheets.spreadsheets.copyTo({
             spreadsheetId: MASTER_SHEET_ID,
             requestBody: {
@@ -341,12 +327,12 @@ app.post("/register", async (req, res) => {
 
         const newSheetId = copyResponse.data.spreadsheetId;
 
-        // 4. Guardar en Supabase con el ID generado automáticamente
+        // Guardar en Supabase
         const { error } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             business_name: business_name || cleanSlug, 
-            password, 
-            sheet_id: newSheetId, // <--- ID automático!
+            password: String(password), 
+            sheet_id: newSheetId, 
             precio: parseInt(precio) || 5000 
         }]);
 
@@ -354,13 +340,12 @@ app.post("/register", async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: "¡Cuenta creada y planilla generada!", 
             slug: cleanSlug 
         });
 
     } catch (e) {
-        console.error("Error en registro automático:", e);
-        res.status(500).json({ error: "No se pudo crear la cuenta automáticamente." });
+        console.error("Error en registro:", e);
+        res.status(500).json({ error: "Error al crear la cuenta automáticamente." });
     }
 });
 
