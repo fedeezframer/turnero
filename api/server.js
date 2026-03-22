@@ -68,39 +68,73 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
+
+        // Validaciones básicas de entrada
+        if (!name || !phone || !fecha || !hora) {
+            return res.status(400).json({ error: "Faltan datos obligatorios." });
+        }
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets();
         
+        // Normalización de datos para comparar y guardar
         const [y, m, d] = fecha.split("-");
         const diaNorm = String(d).padStart(2, '0');
         const mesNorm = String(m).padStart(2, '0');
         const [h, min] = hora.split(":");
         const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+        const textoTurnoNuevo = `${diaNorm}/${mesNorm} - ${horaNorm}`;
 
-        const textoTurno = `${diaNorm}/${mesNorm} - ${horaNorm}`;
+        // --- INICIO FILTRO ANTI-DUPLICADOS ---
+        // Leemos las columnas A, B y C (Nombre, Teléfono, Turno)
+        const checkResponse = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "A:C",
+        });
+
+        const rows = checkResponse.data.values || [];
+        
+        // Buscamos si existe una fila donde coincidan Nombre, Teléfono y el Día
+        const yaTieneTurno = rows.some(row => {
+            const nombreIgual = row[0]?.toString().trim().toLowerCase() === name.trim().toLowerCase();
+            const telefonoIgual = row[1]?.toString().trim() === phone.toString().trim();
+            const mismoDia = row[2]?.toString().includes(`${diaNorm}/${mesNorm}`); 
+            
+            return nombreIgual && telefonoIgual && mismoDia;
+        });
+
+        if (yaTieneTurno) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Ya tenés un turno reservado para este día en esta barbería." 
+            });
+        }
+        // --- FIN FILTRO ANTI-DUPLICADOS ---
+
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
         });
 
+        // Si pasó el filtro, guardamos
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
             range: "A:D", 
             valueInputOption: "RAW",
-            requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
+            requestBody: { values: [[name, phone || "N/A", textoTurnoNuevo, fechaHoyReal]] }
         });
 
         delete globalCache[slug];
         res.json({ success: true });
+
     } catch (e) {
+        console.error("Error en booking:", e);
         res.status(500).json({ error: e.message });
     }
 });
