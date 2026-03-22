@@ -348,7 +348,7 @@ app.post("/register", async (req, res) => {
                 requestBody: {
                     role: 'owner',
                     type: 'user',
-                    emailAddress: 'TU_MAIL_PERSONAL@gmail.com' // <--- PONÉ TU GMAIL AQUÍ
+                    emailAddress: 'federicomartinezcontacto@gmail.com' // <--- PONÉ TU GMAIL AQUÍ
                 }
             });
         } catch (permError) {
