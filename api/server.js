@@ -297,13 +297,12 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-// 6. REGISTRO AUTOMÁTICO
 app.post("/register", async (req, res) => {
     try {
-        const { usuario, business_name, password, precio } = req.body;
+        const { usuario, email, business_name, password, precio } = req.body;
 
-        if (!usuario || !password) {
-            return res.status(400).json({ error: "Faltan datos (usuario y contraseña)." });
+        if (!usuario || !password || !email) {
+            return res.status(400).json({ error: "Faltan datos (usuario, email y contraseña)." });
         }
 
         const cleanSlug = usuario.toLowerCase().trim()
@@ -312,41 +311,38 @@ app.post("/register", async (req, res) => {
             .replace(/[^a-z0-9-]/g, ''); 
 
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
-        if (existingUser) {
-            return res.status(400).json({ success: false, error: "Ese usuario ya está tomado." });
-        }
+        if (existingUser) return res.status(400).json({ success: false, error: "Ese usuario ya está tomado." });
 
-        const sheets = await getSheets();
+        const auth = await getGoogleAuth();
+        const drive = google.drive({ version: "v3", auth });
 
-        // Duplicar la Planilla Maestra usando el ID global
-        const copyResponse = await sheets.spreadsheets.copyTo({
-            spreadsheetId: MASTER_SHEET_ID,
+        // DUPLICAR PLANILLA (Usando Drive API v3 que es la forma correcta)
+        const copyResponse = await drive.files.copy({
+            fileId: MASTER_SHEET_ID,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
             },
         });
 
-        const newSheetId = copyResponse.data.spreadsheetId;
+        const newSheetId = copyResponse.data.id;
 
-        // Guardar en Supabase
+        // INSERT EN SUPABASE (Asegurate que los nombres de columnas coincidan con tu SQL)
         const { error } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
+            email: email,
             business_name: business_name || cleanSlug, 
             password: String(password), 
             sheet_id: newSheetId, 
-            precio: parseInt(precio) || 5000 
+            precio: parseInt(precio) || 10000 
         }]);
 
         if (error) throw error;
 
-        res.json({ 
-            success: true, 
-            slug: cleanSlug 
-        });
+        res.json({ success: true, slug: cleanSlug });
 
     } catch (e) {
         console.error("Error en registro:", e);
-        res.status(500).json({ error: "Error al crear la cuenta automáticamente." });
+        res.status(500).json({ error: e.message });
     }
 });
 
