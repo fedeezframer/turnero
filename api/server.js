@@ -305,25 +305,62 @@ app.post("/cancel-appointment", async (req, res) => {
 });
 
 // 6. REGISTRO
+// Agregá esta constante arriba de todo con el ID de tu Sheet vacío
+const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
+
 app.post("/register", async (req, res) => {
     try {
-        const { slug, business_name, password, sheet_id, precio } = req.body;
-        if (!slug || !password || !sheet_id) return res.status(400).json({ error: "Faltan campos." });
+        const { usuario, business_name, password, precio } = req.body;
 
-        const cleanSlug = slug.toLowerCase().trim().replace(/\s+/g, '-');
+        if (!usuario || !password) {
+            return res.status(400).json({ error: "Faltan datos (usuario y contraseña)." });
+        }
+
+        // 1. Limpiamos el slug (minúsculas, sin espacios, sin caracteres raros)
+        const cleanSlug = usuario.toLowerCase().trim()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Quita acentos
+            .replace(/\s+/g, '-') // Espacios por guiones
+            .replace(/[^a-z0-9-]/g, ''); // Quita todo lo que no sea letra, número o guion
+
+        // 2. Verificar si el usuario ya existe en Supabase
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
+        if (existingUser) {
+            return res.status(400).json({ success: false, error: "Ese usuario ya está tomado. Elegí otro." });
+        }
 
-        if (existingUser) return res.status(400).json({ success: false, error: "Usuario ya existe." });
+        const sheets = await getSheets();
 
+        // 3. AUTOMATIZACIÓN: Duplicar la Planilla Maestra
+        // Esto crea una copia exacta en el Google Drive de la Service Account
+        const copyResponse = await sheets.spreadsheets.copyTo({
+            spreadsheetId: MASTER_SHEET_ID,
+            requestBody: {
+                name: `Turnero - ${business_name || cleanSlug}`,
+            },
+        });
+
+        const newSheetId = copyResponse.data.spreadsheetId;
+
+        // 4. Guardar en Supabase con el ID generado automáticamente
         const { error } = await supabase.from('usuarios').insert([{ 
-            slug: cleanSlug, business_name: business_name || cleanSlug, 
-            password, sheet_id, precio: parseInt(precio) || 5000 
+            slug: cleanSlug, 
+            business_name: business_name || cleanSlug, 
+            password, 
+            sheet_id: newSheetId, // <--- ID automático!
+            precio: parseInt(precio) || 5000 
         }]);
 
         if (error) throw error;
-        res.json({ success: true, slug: cleanSlug });
+
+        res.json({ 
+            success: true, 
+            message: "¡Cuenta creada y planilla generada!", 
+            slug: cleanSlug 
+        });
+
     } catch (e) {
-        res.status(500).json({ error: "Error en registro." });
+        console.error("Error en registro automático:", e);
+        res.status(500).json({ error: "No se pudo crear la cuenta automáticamente." });
     }
 });
 
