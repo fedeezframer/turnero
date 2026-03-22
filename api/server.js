@@ -6,6 +6,7 @@ import { google } from "googleapis";
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
+// ID de tu planilla maestra para clonar en cada registro
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
 
 // --- CONFIGURACIÓN MIDDLEWARE ---
@@ -41,7 +42,7 @@ async function getSheets() {
         },
         scopes: [
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive.file" // Necesario para duplicar archivos
+            "https://www.googleapis.com/auth/drive.file" // Clave para que funcione la clonación
         ],
     });
     const client = await auth.getClient();
@@ -317,7 +318,7 @@ app.post("/register", async (req, res) => {
 
         const sheets = await getSheets();
 
-        // Duplicar la Planilla Maestra
+        // Duplicar la Planilla Maestra usando el ID global
         const copyResponse = await sheets.spreadsheets.copyTo({
             spreadsheetId: MASTER_SHEET_ID,
             requestBody: {
