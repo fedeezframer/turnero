@@ -307,7 +307,6 @@ app.post("/cancel-appointment", async (req, res) => {
 
 // 6. REGISTRO AUTOMÁTICO (FIX DEFINITIVO DE CUOTA)
 app.post("/register", async (req, res) => {
-    console.log("Iniciando registro para:", req.body.usuario);
     try {
         const { usuario, email, business_name, password, precio } = req.body;
 
@@ -326,37 +325,36 @@ app.post("/register", async (req, res) => {
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        // 1. Clonar la planilla dentro de tu carpeta compartida
-        console.log("Clonando planilla...");
+        console.log("Clonando planilla maestra...");
+        
+        // --- PASO 1: Clonar el archivo ---
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
-                parents: [FOLDER_ID] 
+                parents: ["1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"] // Tu FOLDER_ID
             }
         });
 
         const newSheetId = copyResponse.data.id;
 
-        // 2. TRANSFERIR PROPIEDAD (Esto evita el error de Quota Exceeded)
-        // Al pasarte la propiedad a vos, el archivo usa tu cuota de Google Drive.
-        console.log("Transfiriendo propiedad a cuenta personal...");
+        // --- PASO 2: Transferir propiedad para saltar el error de CUOTA ---
+        console.log("Transfiriendo propiedad al dueño real...");
         try {
             await drive.permissions.create({
                 fileId: newSheetId,
-                transferOwnership: true, // Crucial para la cuota
+                transferOwnership: true, 
                 requestBody: {
                     role: 'owner',
                     type: 'user',
-                    emailAddress: 'federicomartinezcontacto@gmail.com' // <--- PONÉ TU GMAIL AQUÍ
+                    emailAddress: 'TU_MAIL_PERSONAL@gmail.com' // <--- TU GMAIL AQUÍ
                 }
             });
-        } catch (permError) {
-            console.error("Aviso: No se pudo transferir propiedad, pero el archivo se creó:", permError.message);
-            // No bloqueamos el registro si esto falla, pero es lo que arregla la cuota a largo plazo.
+        } catch (err) {
+            console.warn("No se pudo transferir propiedad, pero intentaremos seguir:", err.message);
         }
 
-        // 3. Guardar en Supabase
+        // --- PASO 3: Guardar en Supabase ---
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email: email,
@@ -371,7 +369,7 @@ app.post("/register", async (req, res) => {
         res.json({ success: true, slug: cleanSlug });
 
     } catch (e) {
-        console.error("Error crítico en registro:", e);
+        console.error("Error en registro:", e);
         res.status(500).json({ error: e.message });
     }
 });
