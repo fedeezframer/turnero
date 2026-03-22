@@ -15,9 +15,8 @@ app.use(express.json());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // --- SISTEMA DE CACHÉ EN MEMORIA ---
-// Guardamos la data por slug para no saturar Google Sheets
 const globalCache = {}; 
-const CACHE_DURATION = 30000; // 30 segundos de vida para la data
+const CACHE_DURATION = 30000; 
 
 const getCleanSlug = (rawSlug) => {
     if (!rawSlug) return "";
@@ -40,7 +39,7 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. OBTENER OCUPADOS (Con caché simple)
+// 1. OBTENER OCUPADOS
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
@@ -69,7 +68,7 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (Limpia la caché al crear una nueva)
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -99,17 +98,14 @@ app.post("/create-booking", async (req, res) => {
             requestBody: { values: [[name, phone || "N/A", textoTurno, fechaHoyReal]] }
         });
 
-        // IMPORTANTE: Al crear reserva, invalidamos la caché de este slug 
-        // para que el dashboard muestre el cambio de inmediato
         delete globalCache[slug];
-
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. LOGIN (Sin cambios)
+// 3. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -124,14 +120,12 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (Con sistema de Caché por Usuario)
+// 4. ADMIN STATS (CON NOMBRE Y TELÉFONO RECUPERADOS)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
-    // Verificamos si tenemos data reciente para este slug
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
-        console.log(`>>> Sirviendo desde CACHÉ para: ${slug}`);
         return res.json(globalCache[slug].data);
     }
 
@@ -158,7 +152,11 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-            const valorTurno = r[2].trim(); 
+            
+            const nombre = r[0] || "Cliente"; // Columna A
+            const telefono = r[1] || "";    // Columna B
+            const valorTurno = r[2].trim();  // Columna C
+            
             const [fechaParte, horaParte] = valorTurno.split(" - ");
             if(!fechaParte) return;
             const [dia, mes] = fechaParte.split("/").map(Number);
@@ -173,8 +171,11 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else semanas["Sem 4"]++;
 
                 turnosLista.push({
+                    nombre: nombre,
+                    telefono: telefono,
                     fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
-                    hora: horaParte || "00:00"
+                    hora: horaParte || "00:00",
+                    rawTurno: valorTurno
                 });
             }
         });
@@ -194,20 +195,57 @@ app.get("/admin-stats/:slug", async (req, res) => {
             }
         };
 
-        // Guardamos en caché antes de responder
-        globalCache[slug] = {
-            timestamp: now,
-            data: finalData
-        };
-
+        globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
 
     } catch (e) { 
         console.error("Error en stats:", e);
-        // Si falla (ej. por cuota), intentamos devolver la caché vieja aunque haya expirado
         if (globalCache[slug]) return res.json(globalCache[slug].data);
         res.status(500).json({ error: e.message }); 
     }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor corriendo con Caché Activa"));
+// 5. CANCELAR TURNO (BORRAR FILA)
+app.post("/cancel-appointment", async (req, res) => {
+    try {
+        const { slug, rawTurno } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', cleanSlug).single();
+        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
+        const sheets = await getSheets();
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: user.sheet_id,
+            range: "A:C", 
+        });
+
+        const rows = response.data.values || [];
+        const rowIndex = rows.findIndex(r => r[2] && r[2].trim() === rawTurno.trim());
+
+        if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
+
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: user.sheet_id,
+            requestBody: {
+                requests: [{
+                    deleteDimension: {
+                        range: {
+                            sheetId: 0, 
+                            dimension: "ROWS",
+                            startIndex: rowIndex,
+                            endIndex: rowIndex + 1
+                        }
+                    }
+                }]
+            }
+        });
+
+        delete globalCache[cleanSlug];
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con todas las funciones"));idor corriendo con Caché Activa"));
