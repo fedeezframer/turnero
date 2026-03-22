@@ -120,6 +120,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
+// 4. ADMIN STATS (CON MAPEO DE COLUMNAS A Y B)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -135,7 +136,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:E" // Ampliamos el rango para estar seguros
+            range: "A:E" 
         });
         
         const rows = response.data.values || [];
@@ -150,15 +151,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
-            // Saltamos cabecera y verificamos que la columna del turno (C) tenga datos
             if (i === 0 || !r[2]) return;
 
-            // EXTRACCIÓN SEGURA DE DATOS
-            const nombreCliente = (r[0] || "Cliente").trim(); 
-            const telefonoCliente = (r[1] || "").toString().trim();
-            const valorTurno = r[2].toString().trim(); 
+            // ESTO ES LO QUE ARREGLA TU PROBLEMA:
+            const nombreCliente = (r[0] || "Cliente").toString().trim(); // Columna A
+            const telefonoCliente = (r[1] || "").toString().trim();      // Columna B
+            const valorTurno = r[2].toString().trim();                   // Columna C
             
-            // Procesar Fecha: "DD/MM - HH:mm"
             const partes = valorTurno.split(" - ");
             if (partes.length < 2) return;
 
@@ -174,11 +173,10 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
 
-                // Enviamos el objeto con nombres de propiedad claros
                 turnosLista.push({
                     nombre: nombreCliente,
                     telefono: telefonoCliente,
-                    fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
+                    fecha: añoActual + "-" + String(mes).padStart(2, '0') + "-" + String(dia).padStart(2, '0'),
                     hora: horaParte || "00:00",
                     rawTurno: valorTurno
                 });
@@ -210,7 +208,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
-// 5. CANCELAR TURNO (BORRAR FILA)
+// 5. CANCELAR TURNO
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
@@ -253,4 +251,4 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con todas las funciones"));idor corriendo con Caché Activa"));
+app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con Caché Activa"));
