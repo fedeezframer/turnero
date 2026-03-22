@@ -307,7 +307,7 @@ app.post("/cancel-appointment", async (req, res) => {
 
 // 6. REGISTRO AUTOMÁTICO (FIX DEFINITIVO DE CUOTA)
 app.post("/register", async (req, res) => {
-    console.log("Datos recibidos:", req.body);
+    console.log("Iniciando registro para:", req.body.usuario);
     try {
         const { usuario, email, business_name, password, precio } = req.body;
 
@@ -321,38 +321,43 @@ app.post("/register", async (req, res) => {
             .replace(/[^a-z0-9-]/g, ''); 
 
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
-        if (existingUser) return res.status(400).json({ success: false, error: "Ese nombre de usuario ya existe." });
+        if (existingUser) return res.status(400).json({ success: false, error: "El usuario ya existe." });
 
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        console.log("Clonando planilla maestra...");
-        
-        // --- CAMBIO CLAVE PARA LA CUOTA ---
+        // 1. Clonar la planilla dentro de tu carpeta compartida
+        console.log("Clonando planilla...");
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
                 parents: [FOLDER_ID] 
-            },
-            // Esto obliga a que no se use la cuota de la service account si está en una carpeta compartida
-            ignoreDefaultVisibility: true 
+            }
         });
 
         const newSheetId = copyResponse.data.id;
 
-        // Opcional: Darle permisos explícitos a tu mail personal para asegurar acceso
-        await drive.permissions.create({
-            fileId: newSheetId,
-            requestBody: {
-                role: 'owner',
-                type: 'user',
-                emailAddress: 'TU_MAIL_PERSONAL@gmail.com', // <--- PONÉ TU MAIL ACÁ
-            },
-            transferOwnership: true, // Esto te hace dueño a vos y libera a la Service Account
-        });
+        // 2. TRANSFERIR PROPIEDAD (Esto evita el error de Quota Exceeded)
+        // Al pasarte la propiedad a vos, el archivo usa tu cuota de Google Drive.
+        console.log("Transfiriendo propiedad a cuenta personal...");
+        try {
+            await drive.permissions.create({
+                fileId: newSheetId,
+                transferOwnership: true, // Crucial para la cuota
+                requestBody: {
+                    role: 'owner',
+                    type: 'user',
+                    emailAddress: 'TU_MAIL_PERSONAL@gmail.com' // <--- PONÉ TU GMAIL AQUÍ
+                }
+            });
+        } catch (permError) {
+            console.error("Aviso: No se pudo transferir propiedad, pero el archivo se creó:", permError.message);
+            // No bloqueamos el registro si esto falla, pero es lo que arregla la cuota a largo plazo.
+        }
 
-        const { error } = await supabase.from('usuarios').insert([{ 
+        // 3. Guardar en Supabase
+        const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email: email,
             business_name: business_name || cleanSlug, 
@@ -361,15 +366,12 @@ app.post("/register", async (req, res) => {
             precio: parseInt(precio) || 10000 
         }]);
 
-        if (error) throw error;
+        if (supabaseError) throw supabaseError;
+
         res.json({ success: true, slug: cleanSlug });
 
     } catch (e) {
-        console.error("Error detallado:", e);
-        // Si el error es específicamente de cuota, damos un mensaje claro
-        if (e.message.includes("quota")) {
-            return res.status(500).json({ error: "Error de espacio en Google Drive. Verificá los permisos de la carpeta." });
-        }
+        console.error("Error crítico en registro:", e);
         res.status(500).json({ error: e.message });
     }
 });
