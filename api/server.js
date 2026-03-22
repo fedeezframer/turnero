@@ -71,15 +71,14 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (CON FILTRO DE DUPLICADOS EN EL SERVIDOR)
+// 2. CREAR RESERVA (CON FILTRO DE DUPLICADOS MEJORADO)
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        // Validaciones básicas de entrada
         if (!name || !phone || !fecha || !hora) {
-            return res.status(400).json({ error: "Faltan datos obligatorios (nombre, teléfono, fecha u hora)." });
+            return res.status(400).json({ error: "Faltan datos obligatorios." });
         }
 
         const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
@@ -87,16 +86,12 @@ app.post("/create-booking", async (req, res) => {
 
         const sheets = await getSheets();
         
-        // Normalización de datos para comparar y guardar
+        // Normalización de la fecha entrante (YYYY-MM-DD -> DD/MM)
         const [y, m, d] = fecha.split("-");
-        const diaNorm = String(d).padStart(2, '0');
-        const mesNorm = String(m).padStart(2, '0');
-        const [h, min] = hora.split(":");
-        const horaNorm = `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-        const textoTurnoNuevo = `${diaNorm}/${mesNorm} - ${horaNorm}`;
+        const diaMesFormulario = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}`;
+        const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
 
-        // --- FILTRO ANTI-DUPLICADOS ---
-        // Buscamos en las columnas A (Nombre), B (Teléfono) y C (Turno) para ver si ya existe
+        // --- FILTRO ANTI-DUPLICADOS BLINDADO ---
         const checkResponse = await sheets.spreadsheets.values.get({
             spreadsheetId: user.sheet_id,
             range: "A:C",
@@ -104,19 +99,27 @@ app.post("/create-booking", async (req, res) => {
 
         const rows = checkResponse.data.values || [];
         
+        // Limpiamos el teléfono entrante (solo números) para comparar
+        const phoneCleanInput = phone.toString().trim().replace(/\D/g, '');
+
         const yaTieneTurno = rows.some(row => {
-            const nombreIgual = row[0]?.toString().trim().toLowerCase() === name.trim().toLowerCase();
-            const telefonoIgual = row[1]?.toString().trim() === phone.toString().trim();
-            // Comprobamos si el texto del turno contiene el mismo día y mes
-            const mismoDia = row[2]?.toString().includes(`${diaNorm}/${mesNorm}`); 
+            if (!row[0] || !row[1] || !row[2]) return false;
+
+            const nombreEnSheet = row[0].toString().trim().toLowerCase();
+            const telEnSheet = row[1].toString().trim().replace(/\D/g, '');
+            const turnoEnSheet = row[2].toString().trim();
+
+            const nombreMatch = nombreEnSheet === name.trim().toLowerCase();
+            const telMatch = telEnSheet === phoneCleanInput;
+            const fechaMatch = turnoEnSheet.includes(diaMesFormulario);
             
-            return nombreIgual && telefonoIgual && mismoDia;
+            return nombreMatch && telMatch && fechaMatch;
         });
 
         if (yaTieneTurno) {
             return res.status(400).json({ 
                 success: false, 
-                error: "Ya tenés un turno reservado para este día en esta barbería." 
+                error: `Ya tenés un turno agendado para el día ${diaMesFormulario}.` 
             });
         }
         // --- FIN FILTRO ANTI-DUPLICADOS ---
@@ -126,7 +129,6 @@ app.post("/create-booking", async (req, res) => {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
         });
 
-        // Si pasó el filtro, procedemos a guardar en Google Sheets
         await sheets.spreadsheets.values.append({
             spreadsheetId: user.sheet_id,
             range: "A:D", 
@@ -136,7 +138,6 @@ app.post("/create-booking", async (req, res) => {
             }
         });
 
-        // Limpiamos caché del barbero para que vea su nuevo turno al instante
         delete globalCache[slug];
         res.json({ success: true });
 
@@ -162,12 +163,11 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (CON FILTRO DE TURNOS PASADOS Y CÁLCULO REAL)
+// 4. ADMIN STATS
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
-    // Verificamos si hay data en caché válida
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
@@ -183,8 +183,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const rows = response.data.values || [];
-        
-        // --- LÓGICA DE TIEMPO ARGENTINA ---
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
@@ -208,25 +206,19 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
             const [fechaParte, horaParte] = partes;
             const [dia, mes] = fechaParte.split("/").map(Number);
-
-            // Crear objeto de fecha del turno para comparar tiempo
             const [hh, mm] = (horaParte || "00:00").split(":").map(Number);
             const fechaTurnoObj = new Date(añoActual, mes - 1, dia, hh, mm);
             const fechaTurnoUnix = fechaTurnoObj.getTime();
 
-            // 1. LÓGICA DE ESTADÍSTICAS (Mensual y Semanal)
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
-
                 if (dia <= 7) semanas["Sem 1"]++;
                 else if (dia <= 14) semanas["Sem 2"]++;
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
 
-            // 2. LÓGICA DE LISTA DE TURNOS (Solo los que no pasaron todavía)
-            // Filtro: Si el turno es futuro o de hace menos de 15 minutos (margen de gracia)
             if (fechaTurnoUnix > (horaActualUnix - 900000)) {
                 turnosLista.push({
                     nombre: nombreCliente,
@@ -238,7 +230,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             }
         });
 
-        // Ordenar la lista por fecha y hora (más próximos primero)
         turnosLista.sort((a, b) => new Date(a.fecha + "T" + a.hora) - new Date(b.fecha + "T" + b.hora));
 
         const precioUser = user.precio || 5000;
@@ -266,7 +257,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
-// 5. CANCELAR TURNO (DINÁMICO SEGÚN SHEET ID)
+// 5. CANCELAR TURNO
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
@@ -276,8 +267,6 @@ app.post("/cancel-appointment", async (req, res) => {
         if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets();
-
-        // 1. Obtener ID real de la hoja (pestaña) para evitar el error de sheetId: 0
         const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
         const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
 
@@ -291,7 +280,6 @@ app.post("/cancel-appointment", async (req, res) => {
 
         if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
 
-        // 2. Ejecutar la eliminación de la fila
         await sheets.spreadsheets.batchUpdate({
             spreadsheetId: user.sheet_id,
             requestBody: {
@@ -316,50 +304,28 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-// 6. REGISTRO DE NUEVOS BARBEROS
+// 6. REGISTRO
 app.post("/register", async (req, res) => {
     try {
         const { slug, business_name, password, sheet_id, precio } = req.body;
-
-        if (!slug || !password || !sheet_id) {
-            return res.status(400).json({ error: "Faltan campos obligatorios para el registro." });
-        }
+        if (!slug || !password || !sheet_id) return res.status(400).json({ error: "Faltan campos." });
 
         const cleanSlug = slug.toLowerCase().trim().replace(/\s+/g, '-');
+        const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
 
-        // Verificar si el slug ya existe
-        const { data: existingUser } = await supabase
-            .from('usuarios')
-            .select('slug')
-            .eq('slug', cleanSlug)
-            .single();
+        if (existingUser) return res.status(400).json({ success: false, error: "Usuario ya existe." });
 
-        if (existingUser) {
-            return res.status(400).json({ success: false, error: "Este nombre de usuario ya existe." });
-        }
-
-        const { error } = await supabase
-            .from('usuarios')
-            .insert([
-                { 
-                    slug: cleanSlug, 
-                    business_name: business_name || cleanSlug, 
-                    password, 
-                    sheet_id, 
-                    precio: parseInt(precio) || 5000 
-                }
-            ]);
+        const { error } = await supabase.from('usuarios').insert([{ 
+            slug: cleanSlug, business_name: business_name || cleanSlug, 
+            password, sheet_id, precio: parseInt(precio) || 5000 
+        }]);
 
         if (error) throw error;
-
-        res.json({ success: true, message: "¡Registro exitoso!", slug: cleanSlug });
-
+        res.json({ success: true, slug: cleanSlug });
     } catch (e) {
-        console.error("Error en registro:", e);
-        res.status(500).json({ error: "No se pudo crear la cuenta. Revisa los datos." });
+        res.status(500).json({ error: "Error en registro." });
     }
 });
 
-// --- INICIO DEL SERVIDOR ---
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Servidor Turnero Pro Online en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor en puerto ${PORT}`));
