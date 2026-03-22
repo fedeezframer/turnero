@@ -6,11 +6,9 @@ import { google } from "googleapis";
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
+// Ahora todos los usuarios usan esta misma planilla
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-// REEMPLAZA ESTO con el ID de la carpeta que compartiste con el email de la Service Account
-const FOLDER_ID = "1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"; 
 
-// --- CONFIGURACIÓN MIDDLEWARE ---
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST'],
@@ -18,10 +16,8 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// --- CLIENTE SUPABASE ---
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- SISTEMA DE CACHÉ EN MEMORIA ---
 const globalCache = {}; 
 const CACHE_DURATION = 30000; 
 
@@ -35,50 +31,61 @@ const getCleanSlug = (rawSlug) => {
         .trim();
 };
 
-// Función de Auth Unificada para Sheets y Drive
 async function getGoogleAuth() {
-    const auth = new google.auth.GoogleAuth({
+    return new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
             private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
         },
-        scopes: [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive" 
-        ],
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-    return auth;
 }
 
-// Mantenemos getSheets para compatibilidad
 async function getSheets() {
     const auth = await getGoogleAuth();
     const client = await auth.getClient();
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. OBTENER HORARIOS OCUPADOS
+// 1. REGISTRO: Ahora solo guarda en Supabase, apuntando a la planilla única
+app.post("/register", async (req, res) => {
+    try {
+        const { usuario, email, business_name, password, precio } = req.body;
+        if (!usuario || !password || !email) return res.status(400).json({ error: "Faltan datos." });
+
+        const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+        const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
+            slug: cleanSlug, 
+            email,
+            business_name: business_name || cleanSlug, 
+            password: String(password), 
+            sheet_id: MASTER_SHEET_ID, // ID Fijo para todos
+            precio: parseInt(precio) || 10000 
+        }]);
+
+        if (supabaseError) throw supabaseError;
+        res.json({ success: true, slug: cleanSlug });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. OBTENER OCUPADOS: Filtra por la columna E (Slug)
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
-        if (!slug) return res.status(400).json({ error: "Falta el slug" });
-
-        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: user.sheet_id,
-            range: "C:C", 
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E", 
         });
 
         const rows = response.data.values || [];
-        const formatoCorrecto = /^\d{2}\/\d{2} - \d{2}:\d{2}$/;
-
+        // Filtramos: solo turnos donde la columna E coincida con el slug del barbero
         const ocupados = rows
-            .flat()
-            .map(val => val ? val.trim() : "")
-            .filter(val => formatoCorrecto.test(val));
+            .filter(row => row[4] === slug) 
+            .map(row => row[2]); 
 
         res.json({ success: true, ocupados });
     } catch (e) {
@@ -86,75 +93,40 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA
+// 3. CREAR RESERVA: Guarda el slug en la columna E
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        if (!name || !phone || !fecha || !hora) {
-            return res.status(400).json({ error: "Faltan datos obligatorios." });
-        }
-
-        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
         const sheets = await getSheets();
-        
         const [y, m, d] = fecha.split("-");
         const diaMesFormulario = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}`;
         const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
-
-        const checkResponse = await sheets.spreadsheets.values.get({
-            spreadsheetId: user.sheet_id,
-            range: "A:C",
-        });
-
-        const rows = checkResponse.data.values || [];
-        const phoneCleanInput = phone.toString().trim().replace(/\D/g, '');
-
-        const yaTieneTurno = rows.some(row => {
-            if (!row[0] || !row[1] || !row[2]) return false;
-            const nombreEnSheet = row[0].toString().trim().toLowerCase();
-            const telEnSheet = row[1].toString().trim().replace(/\D/g, '');
-            const turnoEnSheet = row[2].toString().trim();
-
-            return nombreEnSheet === name.trim().toLowerCase() && 
-                   telEnSheet === phoneCleanInput && 
-                   turnoEnSheet.includes(diaMesFormulario);
-        });
-
-        if (yaTieneTurno) {
-            return res.status(400).json({ 
-                success: false, 
-                error: `Ya tenés un turno agendado para el día ${diaMesFormulario}.` 
-            });
-        }
 
         const ahora = new Date();
         const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
             day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
         });
 
+        // Guardamos: Nombre(A), Tel(B), Turno(C), Registro(D), SLUG(E)
         await sheets.spreadsheets.values.append({
-            spreadsheetId: user.sheet_id,
-            range: "A:D", 
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E", 
             valueInputOption: "RAW",
             requestBody: { 
-                values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal]] 
+                values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] 
             }
         });
 
         delete globalCache[slug];
         res.json({ success: true });
-
     } catch (e) {
-        console.error("Error en booking:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. LOGIN ADMIN
+// 4. LOGIN ADMIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -170,7 +142,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS
+// 5. ADMIN STATS: Filtra turnos por slug para las estadísticas
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -181,24 +153,22 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
     try {
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (!user) return res.status(404).json({ error: "No user" });
-
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
-            spreadsheetId: user.sheet_id, 
+            spreadsheetId: MASTER_SHEET_ID, 
             range: "A:E" 
         });
         
-        const rows = response.data.values || [];
+        const allRows = response.data.values || [];
+        // Filtramos solo las filas que pertenecen a este barbero (columna E)
+        const rows = allRows.filter((r, i) => i === 0 || r[4] === slug);
+
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
         const añoActual = ahoraArg.getFullYear();
-        const horaActualUnix = ahoraArg.getTime();
 
-        let turnosHoy = 0;
-        let turnosMesActual = 0;
-        let turnosLista = [];
+        let turnosHoy = 0, turnosMesActual = 0, turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
@@ -208,9 +178,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
             const [fechaParte, horaParte] = partes;
             const [dia, mes] = fechaParte.split("/").map(Number);
-            const [hh, mm] = (horaParte || "00:00").split(":").map(Number);
-            const fechaTurnoObj = new Date(añoActual, mes - 1, dia, hh, mm);
-            const fechaTurnoUnix = fechaTurnoObj.getTime();
 
             if (mes === mesActual) {
                 turnosMesActual++;
@@ -221,69 +188,57 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else semanas["Sem 4"]++;
             }
 
-            if (fechaTurnoUnix > (horaActualUnix - 900000)) {
-                turnosLista.push({
-                    nombre: r[0],
-                    telefono: r[1],
-                    fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
-                    hora: horaParte,
-                    rawTurno: r[2]
-                });
-            }
+            turnosLista.push({
+                nombre: r[0],
+                telefono: r[1],
+                fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
+                hora: horaParte,
+                rawTurno: r[2]
+            });
         });
-
-        turnosLista.sort((a, b) => new Date(a.fecha + "T" + a.hora) - new Date(b.fecha + "T" + b.hora));
-
-        const precioUser = user.precio || 5000;
-        const ingresosMesActual = turnosMesActual * precioUser;
 
         const finalData = {
             stats: {
                 turnosHoy,
                 turnosMes: turnosMesActual,
-                ingresosEstimados: ingresosMesActual,
-                promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
+                ingresosEstimados: turnosMesActual * (user.precio || 10000),
+                promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 10000)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                turnosLista: turnosLista
+                turnosLista: turnosLista.sort((a, b) => new Date(a.fecha + "T" + a.hora) - new Date(b.fecha + "T" + b.hora))
             }
         };
 
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
-
-    } catch (e) { 
-        console.error("Error en stats:", e);
-        if (globalCache[slug]) return res.json(globalCache[slug].data);
-        res.status(500).json({ error: e.message }); 
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
-// 5. CANCELAR TURNO
+// 6. CANCELAR: Busca la fila que coincida con el slug y el turno
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        const { data: user } = await supabase.from('usuarios').select('sheet_id').eq('slug', cleanSlug).single();
-        if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-
         const sheets = await getSheets();
-        const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: user.sheet_id });
-        const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
-
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: user.sheet_id,
-            range: "A:C", 
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E", 
         });
 
         const rows = response.data.values || [];
-        const rowIndex = rows.findIndex(r => r[2] && r[2].trim() === rawTurno.trim());
+        // Buscamos la fila donde coincida el turno (C) Y el slug (E)
+        const rowIndex = rows.findIndex(r => r[2] === rawTurno && r[4] === cleanSlug);
 
         if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
 
+        const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: MASTER_SHEET_ID });
+        const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
+
         await sheets.spreadsheets.batchUpdate({
-            spreadsheetId: user.sheet_id,
+            spreadsheetId: MASTER_SHEET_ID,
             requestBody: {
                 requests: [{
                     deleteDimension: {
@@ -301,67 +256,6 @@ app.post("/cancel-appointment", async (req, res) => {
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 6. REGISTRO AUTOMÁTICO (FIX DE PERMISOS Y CARPETAS)
-app.post("/register", async (req, res) => {
-    try {
-        const { usuario, email, business_name, password, precio } = req.body;
-        if (!usuario || !password || !email) return res.status(400).json({ error: "Faltan datos." });
-
-        const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-        const auth = await getGoogleAuth();
-        const drive = google.drive({ version: "v3", auth });
-
-        console.log("Clonando planilla maestra en carpeta compartida...");
-
-        // USAMOS drive.files.copy que es más directo que crear y copiar hojas
-        const copyResponse = await drive.files.copy({
-            fileId: MASTER_SHEET_ID,
-            // ESTAS DOS LÍNEAS SON CLAVE PARA EL ERROR DE PERMISOS
-            supportsAllDrives: true, 
-            includeItemsFromAllDrives: true,
-            requestBody: {
-                name: `Turnero - ${business_name || cleanSlug}`,
-                parents: ["1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"] 
-            }
-        });
-
-        const newSheetId = copyResponse.data.id;
-
-        // Intentamos transferir propiedad (si falla no corta el proceso)
-        try {
-            await drive.permissions.create({
-                fileId: newSheetId,
-                transferOwnership: true,
-                supportsAllDrives: true,
-                requestBody: {
-                    role: 'owner',
-                    type: 'user',
-                    emailAddress: 'TU_MAIL_PERSONAL@gmail.com' // REEMPLAZA CON TU MAIL
-                }
-            });
-        } catch (e) {
-            console.log("Nota: No se transfirió propiedad pero el archivo se creó.");
-        }
-
-        const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
-            slug: cleanSlug, 
-            email,
-            business_name: business_name || cleanSlug, 
-            password: String(password), 
-            sheet_id: newSheetId, 
-            precio: parseInt(precio) || 10000 
-        }]);
-
-        if (supabaseError) throw supabaseError;
-        res.json({ success: true, slug: cleanSlug });
-
-    } catch (e) {
-        console.error("Error detallado:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
