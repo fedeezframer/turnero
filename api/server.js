@@ -6,7 +6,6 @@ import { google } from "googleapis";
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
-// ID de tu planilla maestra para clonar en cada registro
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
 
 // --- CONFIGURACIÓN MIDDLEWARE ---
@@ -34,7 +33,8 @@ const getCleanSlug = (rawSlug) => {
         .trim();
 };
 
-async function getSheets() {
+// Función de Auth Unificada para Sheets y Drive
+async function getGoogleAuth() {
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -42,9 +42,15 @@ async function getSheets() {
         },
         scopes: [
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive.file" // Clave para que funcione la clonación
+            "https://www.googleapis.com/auth/drive" 
         ],
     });
+    return auth;
+}
+
+// Mantenemos getSheets para compatibilidad con tus rutas existentes
+async function getSheets() {
+    const auth = await getGoogleAuth();
     const client = await auth.getClient();
     return google.sheets({ version: "v4", auth: client });
 }
@@ -78,7 +84,7 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 2. CREAR RESERVA (CON FILTRO DE DUPLICADOS MEJORADO)
+// 2. CREAR RESERVA
 app.post("/create-booking", async (req, res) => {
     try {
         let { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -297,6 +303,7 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
+// 6. REGISTRO AUTOMÁTICO (CORREGIDO)
 app.post("/register", async (req, res) => {
     console.log("Datos recibidos:", req.body);
     try {
@@ -311,14 +318,13 @@ app.post("/register", async (req, res) => {
             .replace(/\s+/g, '-') 
             .replace(/[^a-z0-9-]/g, ''); 
 
-        // Verificar si ya existe
         const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
         if (existingUser) return res.status(400).json({ success: false, error: "Ese nombre de usuario ya existe." });
 
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        // DUPLICAR PLANILLA
+        console.log("Clonando planilla maestra...");
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
@@ -328,7 +334,6 @@ app.post("/register", async (req, res) => {
 
         const newSheetId = copyResponse.data.id;
 
-        // INSERT EN SUPABASE
         const { error } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email: email,
