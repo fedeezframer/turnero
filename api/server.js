@@ -7,6 +7,8 @@ const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
+// REEMPLAZA ESTO con el ID de la carpeta que compartiste con el email de la Service Account
+const FOLDER_ID = "1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"; 
 
 // --- CONFIGURACIÓN MIDDLEWARE ---
 app.use(cors({
@@ -48,7 +50,7 @@ async function getGoogleAuth() {
     return auth;
 }
 
-// Mantenemos getSheets para compatibilidad con tus rutas existentes
+// Mantenemos getSheets para compatibilidad
 async function getSheets() {
     const auth = await getGoogleAuth();
     const client = await auth.getClient();
@@ -303,7 +305,7 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-// 6. REGISTRO AUTOMÁTICO (CORREGIDO)
+// 6. REGISTRO AUTOMÁTICO (CON FIX DE CUOTA/DRIVE)
 app.post("/register", async (req, res) => {
     console.log("Datos recibidos:", req.body);
     try {
@@ -324,11 +326,12 @@ app.post("/register", async (req, res) => {
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        console.log("Clonando planilla maestra...");
+        console.log("Clonando planilla maestra en carpeta compartida...");
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
+                parents: [FOLDER_ID] // <--- SOLUCIÓN AL ERROR DE CUOTA
             },
         });
 
