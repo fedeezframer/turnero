@@ -305,14 +305,14 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-// 6. REGISTRO AUTOMÁTICO (CON FIX DE CUOTA/DRIVE)
+// 6. REGISTRO AUTOMÁTICO (FIX DEFINITIVO DE CUOTA)
 app.post("/register", async (req, res) => {
     console.log("Datos recibidos:", req.body);
     try {
         const { usuario, email, business_name, password, precio } = req.body;
 
         if (!usuario || !password || !email) {
-            return res.status(400).json({ error: "Faltan datos obligatorios (usuario, email o contraseña)." });
+            return res.status(400).json({ error: "Faltan datos obligatorios." });
         }
 
         const cleanSlug = usuario.toLowerCase().trim()
@@ -326,16 +326,31 @@ app.post("/register", async (req, res) => {
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
 
-        console.log("Clonando planilla maestra en carpeta compartida...");
+        console.log("Clonando planilla maestra...");
+        
+        // --- CAMBIO CLAVE PARA LA CUOTA ---
         const copyResponse = await drive.files.copy({
             fileId: MASTER_SHEET_ID,
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
-                parents: [FOLDER_ID] // <--- SOLUCIÓN AL ERROR DE CUOTA
+                parents: [FOLDER_ID] 
             },
+            // Esto obliga a que no se use la cuota de la service account si está en una carpeta compartida
+            ignoreDefaultVisibility: true 
         });
 
         const newSheetId = copyResponse.data.id;
+
+        // Opcional: Darle permisos explícitos a tu mail personal para asegurar acceso
+        await drive.permissions.create({
+            fileId: newSheetId,
+            requestBody: {
+                role: 'owner',
+                type: 'user',
+                emailAddress: 'TU_MAIL_PERSONAL@gmail.com', // <--- PONÉ TU MAIL ACÁ
+            },
+            transferOwnership: true, // Esto te hace dueño a vos y libera a la Service Account
+        });
 
         const { error } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
@@ -347,11 +362,14 @@ app.post("/register", async (req, res) => {
         }]);
 
         if (error) throw error;
-
         res.json({ success: true, slug: cleanSlug });
 
     } catch (e) {
-        console.error("Error en registro:", e);
+        console.error("Error detallado:", e);
+        // Si el error es específicamente de cuota, damos un mensaje claro
+        if (e.message.includes("quota")) {
+            return res.status(500).json({ error: "Error de espacio en Google Drive. Verificá los permisos de la carpeta." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
