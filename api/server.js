@@ -120,7 +120,6 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (CON NOMBRE Y TELÉFONO RECUPERADOS)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -136,7 +135,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: user.sheet_id, 
-            range: "A:D" 
+            range: "A:E" // Ampliamos el rango para estar seguros
         });
         
         const rows = response.data.values || [];
@@ -151,14 +150,19 @@ app.get("/admin-stats/:slug", async (req, res) => {
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
+            // Saltamos cabecera y verificamos que la columna del turno (C) tenga datos
             if (i === 0 || !r[2]) return;
+
+            // EXTRACCIÓN SEGURA DE DATOS
+            const nombreCliente = (r[0] || "Cliente").trim(); 
+            const telefonoCliente = (r[1] || "").toString().trim();
+            const valorTurno = r[2].toString().trim(); 
             
-            const nombre = r[0] || "Cliente"; // Columna A
-            const telefono = r[1] || "";    // Columna B
-            const valorTurno = r[2].trim();  // Columna C
-            
-            const [fechaParte, horaParte] = valorTurno.split(" - ");
-            if(!fechaParte) return;
+            // Procesar Fecha: "DD/MM - HH:mm"
+            const partes = valorTurno.split(" - ");
+            if (partes.length < 2) return;
+
+            const [fechaParte, horaParte] = partes;
             const [dia, mes] = fechaParte.split("/").map(Number);
 
             if (mes === mesActual) {
@@ -170,9 +174,10 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
 
+                // Enviamos el objeto con nombres de propiedad claros
                 turnosLista.push({
-                    nombre: nombre,
-                    telefono: telefono,
+                    nombre: nombreCliente,
+                    telefono: telefonoCliente,
                     fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
                     hora: horaParte || "00:00",
                     rawTurno: valorTurno
