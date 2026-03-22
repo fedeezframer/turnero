@@ -305,59 +305,45 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-// 6. REGISTRO AUTOMÁTICO (FIX DEFINITIVO DE CUOTA)
 app.post("/register", async (req, res) => {
     try {
         const { usuario, email, business_name, password, precio } = req.body;
+        if (!usuario || !password || !email) return res.status(400).json({ error: "Faltan datos." });
 
-        if (!usuario || !password || !email) {
-            return res.status(400).json({ error: "Faltan datos obligatorios." });
-        }
-
-        const cleanSlug = usuario.toLowerCase().trim()
-            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") 
-            .replace(/\s+/g, '-') 
-            .replace(/[^a-z0-9-]/g, ''); 
-
-        const { data: existingUser } = await supabase.from('usuarios').select('slug').eq('slug', cleanSlug).single();
-        if (existingUser) return res.status(400).json({ success: false, error: "El usuario ya existe." });
+        const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
         const auth = await getGoogleAuth();
         const drive = google.drive({ version: "v3", auth });
+        const sheets = google.sheets({ version: "v4", auth });
 
-        console.log("Clonando planilla maestra...");
+        console.log("Creando planilla nueva desde cero...");
         
-        // --- PASO 1: Clonar el archivo ---
-        const copyResponse = await drive.files.copy({
-            fileId: MASTER_SHEET_ID,
+        // PASO 1: Crear una planilla vacía directamente en TU carpeta
+        const createResponse = await drive.files.create({
             requestBody: {
                 name: `Turnero - ${business_name || cleanSlug}`,
+                mimeType: 'application/vnd.google-apps.spreadsheet',
                 parents: ["1T9tgkJhKmtZM8GyT0vKkehTb6qAp8xDV"] // Tu FOLDER_ID
             }
         });
 
-        const newSheetId = copyResponse.data.id;
+        const newSheetId = createResponse.data.id;
 
-        // --- PASO 2: Transferir propiedad para saltar el error de CUOTA ---
-        console.log("Transfiriendo propiedad al dueño real...");
-        try {
-            await drive.permissions.create({
-                fileId: newSheetId,
-                transferOwnership: true, 
-                requestBody: {
-                    role: 'owner',
-                    type: 'user',
-                    emailAddress: 'federicomartinezcontacto@gmail.com' // <--- TU GMAIL AQUÍ
-                }
-            });
-        } catch (err) {
-            console.warn("No se pudo transferir propiedad, pero intentaremos seguir:", err.message);
-        }
+        // PASO 2: Copiar las hojas de la MAESTRA a la NUEVA
+        // Esto suele saltarse el chequeo de cuota de almacenamiento de archivos
+        console.log("Copiando estructura de maestra...");
+        await sheets.spreadsheets.sheets.copyTo({
+            spreadsheetId: MASTER_SHEET_ID,
+            sheetId: 0, // ID de la pestaña (normalmente 0 es la primera)
+            requestBody: {
+                destinationSpreadsheetId: newSheetId
+            }
+        });
 
-        // --- PASO 3: Guardar en Supabase ---
+        // PASO 3: Guardar en Supabase
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
-            email: email,
+            email,
             business_name: business_name || cleanSlug, 
             password: String(password), 
             sheet_id: newSheetId, 
@@ -365,11 +351,10 @@ app.post("/register", async (req, res) => {
         }]);
 
         if (supabaseError) throw supabaseError;
-
         res.json({ success: true, slug: cleanSlug });
 
     } catch (e) {
-        console.error("Error en registro:", e);
+        console.error("Error detallado:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
