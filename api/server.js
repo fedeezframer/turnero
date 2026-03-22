@@ -120,7 +120,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 4. ADMIN STATS (CON MAPEO DE COLUMNAS A Y B)
+// 4. ADMIN STATS (CON FILTRO DE TURNOS PASADOS Y CÁLCULO REAL)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -140,10 +140,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const rows = response.data.values || [];
+        
+        // --- LÓGICA DE TIEMPO ARGENTINA ---
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
         const añoActual = ahoraArg.getFullYear();
+        const horaActualUnix = ahoraArg.getTime();
 
         let turnosHoy = 0;
         let turnosMesActual = 0;
@@ -153,10 +156,9 @@ app.get("/admin-stats/:slug", async (req, res) => {
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
 
-            // ESTO ES LO QUE ARREGLA TU PROBLEMA:
-            const nombreCliente = (r[0] || "Cliente").toString().trim(); // Columna A
-            const telefonoCliente = (r[1] || "").toString().trim();      // Columna B
-            const valorTurno = r[2].toString().trim();                   // Columna C
+            const nombreCliente = (r[0] || "Cliente").toString().trim(); 
+            const telefonoCliente = (r[1] || "").toString().trim();
+            const valorTurno = r[2].toString().trim(); 
             
             const partes = valorTurno.split(" - ");
             if (partes.length < 2) return;
@@ -164,6 +166,12 @@ app.get("/admin-stats/:slug", async (req, res) => {
             const [fechaParte, horaParte] = partes;
             const [dia, mes] = fechaParte.split("/").map(Number);
 
+            // Crear objeto de fecha del turno para comparar tiempo
+            const [hh, mm] = (horaParte || "00:00").split(":").map(Number);
+            const fechaTurnoObj = new Date(añoActual, mes - 1, dia, hh, mm);
+            const fechaTurnoUnix = fechaTurnoObj.getTime();
+
+            // 1. LÓGICA DE ESTADÍSTICAS (Todo el mes)
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
@@ -172,7 +180,11 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 14) semanas["Sem 2"]++;
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
+            }
 
+            // 2. LÓGICA DE LISTA (Solo lo que no pasó)
+            // Filtro: Si el turno es de HOY o FUTURO (damos 15 min de gracia para que no desaparezca justo en el momento)
+            if (fechaTurnoUnix > (horaActualUnix - 900000)) {
                 turnosLista.push({
                     nombre: nombreCliente,
                     telefono: telefonoCliente,
@@ -194,7 +206,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 promedioDiario: diaHoyNum > 0 ? Math.round(ingresosMesActual / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                turnosLista: turnosLista
+                turnosLista: turnosLista // Enviamos la lista ya filtrada
             }
         };
 
@@ -251,4 +263,4 @@ app.post("/cancel-appointment", async (req, res) => {
     }
 });
 
-app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con Caché Activa"));
+app.listen(process.env.PORT || 10000, () => console.log("Servidor Online con Filtro Temporal"));
