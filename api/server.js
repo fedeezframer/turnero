@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
+import { MercadoPagoConfig, Preference } from "mercadopago";
 
 const app = express();
 
@@ -16,6 +17,11 @@ app.use(cors({
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// --- CONFIGURACIÓN MERCADO PAGO ---
+const mpClient = new MercadoPagoConfig({ 
+    accessToken: process.env.MP_ACCESS_TOKEN 
+});
 
 // --- CACHÉ SISTEMA ---
 const globalCache = {}; 
@@ -46,6 +52,48 @@ async function getSheets() {
     const client = await auth.getClient();
     return google.sheets({ version: "v4", auth: client });
 }
+
+// --- 0. NUEVO: MERCADO PAGO PREFERENCE ---
+app.post("/api/create-preference", async (req, res) => {
+    try {
+        const { name, phone, fecha, hora, slug, price } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        const preference = new Preference(mpClient);
+
+        const response = await preference.create({
+            body: {
+                items: [
+                    {
+                        title: `Reserva: ${fecha} - ${hora}hs`,
+                        unit_price: Number(price || 5000),
+                        quantity: 1,
+                        currency_id: "ARS"
+                    }
+                ],
+                metadata: {
+                    nombre: name,
+                    telefono: phone,
+                    fecha: fecha,
+                    hora: hora,
+                    slug: cleanSlug
+                },
+                back_urls: {
+                    success: "https://casacatest.framer.website/gracias",
+                    failure: "https://casacatest.framer.website/",
+                    pending: "https://casacatest.framer.website/"
+                },
+                auto_return: "approved",
+                // notification_url: "TU_URL_DE_RENDER/webhook" // Para activar luego con Webhooks
+            },
+        });
+
+        res.json({ payment_url: response.init_point });
+    } catch (error) {
+        console.error("Error al crear preferencia:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // 1. REGISTRO
 app.post("/register", async (req, res) => {
@@ -148,7 +196,7 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 5. CREAR RESERVA
+// 5. CREAR RESERVA (Directa sin pago)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -214,7 +262,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 7. ADMIN STATS & CONFIG (Mapeo corregido)
+// 7. ADMIN STATS & CONFIG
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
