@@ -96,32 +96,58 @@ app.get("/get-occupied", async (req, res) => {
 // 3. CREAR RESERVA: Guarda el slug en la columna E
 app.post("/create-booking", async (req, res) => {
     try {
-        let { name, phone, fecha, hora, slug: rawSlug } = req.body;
+        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        const sheets = await getSheets();
-        const [y, m, d] = fecha.split("-");
-        const diaMesFormulario = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}`;
-        const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
+        if (!fecha || !hora || !phone) {
+            return res.status(400).json({ error: "Datos incompletos" });
+        }
 
-        const ahora = new Date();
-        const fechaHoyReal = ahora.toLocaleDateString('es-AR', {
-            day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Argentina/Buenos_Aires'
+        const sheets = await getSheets();
+        
+        // 1. OBTENER TODOS LOS TURNOS PARA VALIDAR (Anti-Spam)
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E",
         });
 
-        // Guardamos: Nombre(A), Tel(B), Turno(C), Registro(D), SLUG(E)
+        const rows = response.data.values || [];
+        
+        // 2. BUSCAR SI EL TELÉFONO YA TIENE UN TURNO ACTIVO EN ESTE SLUG
+        // Filtramos: mismo teléfono Y mismo slug
+        const yaTieneTurno = rows.some(row => 
+            row[1] === phone.toString().trim() && 
+            row[4] === slug
+        );
+
+        if (yaTieneTurno) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "Ya tenés un turno agendado con este barbero. Debes esperar a que pase para sacar otro." 
+            });
+        }
+
+        // 3. SI NO TIENE, PROCEDEMOS A AGENDAR
+        // (El resto del código de guardado que ya tenías...)
+        const partes = fecha.split("-");
+        const diaMesFormulario = `${partes[2]}/${partes[1]}`;
+        const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
+        const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+
         await sheets.spreadsheets.values.append({
             spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E", 
+            range: "A:E",
             valueInputOption: "RAW",
-            requestBody: { 
-                values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] 
+            requestBody: {
+                values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
             }
         });
 
         delete globalCache[slug];
         res.json({ success: true });
+
     } catch (e) {
+        console.error("ERROR:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
