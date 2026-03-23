@@ -56,8 +56,22 @@ async function getSheets() {
 // --- 0. NUEVO: MERCADO PAGO PREFERENCE ---
 app.post("/api/create-preference", async (req, res) => {
     try {
-        const { name, phone, fecha, hora, slug, price } = req.body;
+        const { name, phone, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
+
+        // 1. Buscamos el precio real en Supabase para este slug
+        const { data: user, error: userError } = await supabase
+            .from('usuarios')
+            .select('precio, business_name')
+            .eq('slug', cleanSlug)
+            .single();
+
+        if (userError || !user) {
+            return res.status(404).json({ error: "No se encontró el negocio para obtener el precio." });
+        }
+
+        const precioReal = Number(user.precio) || 5000; // Si no hay precio, usa 5000 de respaldo
+        const nombreNegocio = user.business_name || cleanSlug;
 
         const preference = new Preference(mpClient);
 
@@ -65,8 +79,8 @@ app.post("/api/create-preference", async (req, res) => {
             body: {
                 items: [
                     {
-                        title: `Reserva: ${fecha} - ${hora}hs`,
-                        unit_price: Number(price || 5000),
+                        title: `Reserva en ${nombreNegocio}: ${fecha} - ${hora}hs`,
+                        unit_price: precioReal,
                         quantity: 1,
                         currency_id: "ARS"
                     }
@@ -76,7 +90,8 @@ app.post("/api/create-preference", async (req, res) => {
                     telefono: phone,
                     fecha: fecha,
                     hora: hora,
-                    slug: cleanSlug
+                    slug: cleanSlug,
+                    precio: precioReal
                 },
                 back_urls: {
                     success: "https://casacatest.framer.website/gracias",
@@ -84,7 +99,6 @@ app.post("/api/create-preference", async (req, res) => {
                     pending: "https://casacatest.framer.website/"
                 },
                 auto_return: "approved",
-                // notification_url: "TU_URL_DE_RENDER/webhook" // Para activar luego con Webhooks
             },
         });
 
