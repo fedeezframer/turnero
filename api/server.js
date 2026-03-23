@@ -100,7 +100,7 @@ app.post("/api/create-preference", async (req, res) => {
                 },
                 auto_return: "approved",
                 // IMPORTANTE: Reemplaza con tu URL real de Render para que el Webhook funcione
-                notification_url: "https://TU_APP_EN_RENDER.onrender.com/webhook"
+                notification_url: "https://framerturnero.onrender.com/webhook"
             },
         });
 
