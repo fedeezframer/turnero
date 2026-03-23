@@ -6,7 +6,6 @@ import { google } from "googleapis";
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
-// Ahora todos los usuarios usan esta misma planilla
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
 
 app.use(cors({
@@ -47,7 +46,7 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. REGISTRO: Ahora solo guarda en Supabase, apuntando a la planilla única
+// 1. REGISTRO: Solo guarda en Supabase
 app.post("/register", async (req, res) => {
     try {
         const { usuario, email, business_name, password, precio } = req.body;
@@ -60,7 +59,7 @@ app.post("/register", async (req, res) => {
             email,
             business_name: business_name || cleanSlug, 
             password: String(password), 
-            sheet_id: MASTER_SHEET_ID, // ID Fijo para todos
+            sheet_id: MASTER_SHEET_ID,
             precio: parseInt(precio) || 10000 
         }]);
 
@@ -71,7 +70,50 @@ app.post("/register", async (req, res) => {
     }
 });
 
-// 2. OBTENER OCUPADOS: Filtra por la columna E (Slug)
+// 2. VERIFICAR SESIÓN (Filtro de Hierro para ProtectedRoute)
+app.get("/verify-session", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.query.u);
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('slug')
+            .eq('slug', slug)
+            .single();
+
+        if (error || !user) {
+            return res.json({ active: false });
+        }
+        res.json({ active: true });
+    } catch (e) {
+        res.json({ active: false });
+    }
+});
+
+// 3. ACTUALIZAR CONFIGURACIÓN (Settings del Barbero)
+app.post("/update-settings", async (req, res) => {
+    try {
+        const { slug, business_name, precio } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        const { error } = await supabase
+            .from('usuarios')
+            .update({ 
+                business_name: business_name, 
+                precio: parseInt(precio) 
+            })
+            .eq('slug', cleanSlug);
+
+        if (error) throw error;
+
+        // Limpiamos cache para que las stats se actualicen con el nuevo precio/nombre
+        delete globalCache[cleanSlug];
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 4. OBTENER OCUPADOS
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
@@ -82,7 +124,6 @@ app.get("/get-occupied", async (req, res) => {
         });
 
         const rows = response.data.values || [];
-        // Filtramos: solo turnos donde la columna E coincida con el slug del barbero
         const ocupados = rows
             .filter(row => row[4] === slug) 
             .map(row => row[2]); 
@@ -93,7 +134,7 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 3. CREAR RESERVA: Guarda el slug en la columna E
+// 5. CREAR RESERVA (Con Anti-Spam)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -104,17 +145,12 @@ app.post("/create-booking", async (req, res) => {
         }
 
         const sheets = await getSheets();
-        
-        // 1. OBTENER TODOS LOS TURNOS PARA VALIDAR (Anti-Spam)
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: MASTER_SHEET_ID,
             range: "A:E",
         });
 
         const rows = response.data.values || [];
-        
-        // 2. BUSCAR SI EL TELÉFONO YA TIENE UN TURNO ACTIVO EN ESTE SLUG
-        // Filtramos: mismo teléfono Y mismo slug
         const yaTieneTurno = rows.some(row => 
             row[1] === phone.toString().trim() && 
             row[4] === slug
@@ -123,12 +159,10 @@ app.post("/create-booking", async (req, res) => {
         if (yaTieneTurno) {
             return res.status(400).json({ 
                 success: false, 
-                error: "Ya tenés un turno agendado con este barbero. Debes esperar a que pase para sacar otro." 
+                error: "Ya tenés un turno agendado con este barbero." 
             });
         }
 
-        // 3. SI NO TIENE, PROCEDEMOS A AGENDAR
-        // (El resto del código de guardado que ya tenías...)
         const partes = fecha.split("-");
         const diaMesFormulario = `${partes[2]}/${partes[1]}`;
         const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
@@ -145,14 +179,12 @@ app.post("/create-booking", async (req, res) => {
 
         delete globalCache[slug];
         res.json({ success: true });
-
     } catch (e) {
-        console.error("ERROR:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 4. LOGIN ADMIN
+// 6. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -168,7 +200,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 5. ADMIN STATS: Filtra turnos por slug para las estadísticas
+// 7. ADMIN STATS
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -186,7 +218,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const allRows = response.data.values || [];
-        // Filtramos solo las filas que pertenecen a este barbero (columna E)
         const rows = allRows.filter((r, i) => i === 0 || r[4] === slug);
 
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
@@ -242,7 +273,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
-// 6. CANCELAR: Busca la fila que coincida con el slug y el turno
+// 8. CANCELAR
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
@@ -255,7 +286,6 @@ app.post("/cancel-appointment", async (req, res) => {
         });
 
         const rows = response.data.values || [];
-        // Buscamos la fila donde coincida el turno (C) Y el slug (E)
         const rowIndex = rows.findIndex(r => r[2] === rawTurno && r[4] === cleanSlug);
 
         if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
