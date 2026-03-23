@@ -111,6 +111,7 @@ app.post("/update-settings", async (req, res) => {
                 business_name: business_name, 
                 precio: parseInt(precio),
                 duracion_turno: parseInt(duracion_turno),
+                // Aseguramos que los nombres coincidan con tu SQL Editor
                 hora_inicio_jornada: h_ini_j,
                 hora_fin_jornada: h_fin_j,
                 descanso_inicio: d_ini,
@@ -120,7 +121,6 @@ app.post("/update-settings", async (req, res) => {
 
         if (error) throw error;
 
-        // Limpiamos el caché para que el cambio se vea YA en el frontend
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) {
