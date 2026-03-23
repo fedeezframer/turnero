@@ -53,13 +53,13 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// --- 0. NUEVO: MERCADO PAGO PREFERENCE ---
+// --- 0. MERCADO PAGO: CREAR PREFERENCIA ---
 app.post("/api/create-preference", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // 1. Buscamos el precio real en Supabase para este slug
+        // Buscamos el precio real en Supabase para evitar manipulaciones en el frontend
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('precio, business_name')
@@ -67,10 +67,10 @@ app.post("/api/create-preference", async (req, res) => {
             .single();
 
         if (userError || !user) {
-            return res.status(404).json({ error: "No se encontró el negocio para obtener el precio." });
+            return res.status(404).json({ error: "No se encontró el negocio para procesar el pago." });
         }
 
-        const precioReal = Number(user.precio) || 5000; // Si no hay precio, usa 5000 de respaldo
+        const precioReal = Number(user.precio) || 5000;
         const nombreNegocio = user.business_name || cleanSlug;
 
         const preference = new Preference(mpClient);
@@ -94,11 +94,13 @@ app.post("/api/create-preference", async (req, res) => {
                     precio: precioReal
                 },
                 back_urls: {
-                    success: "https://casacatest.framer.website/gracias",
-                    failure: "https://casacatest.framer.website/",
-                    pending: "https://casacatest.framer.website/"
+                    success: "https://dreamwebtesttemplate.framer.website/success",
+                    failure: "https://dreamwebtesttemplate.framer.website/error",
+                    pending: "https://dreamwebtesttemplate.framer.website/error"
                 },
                 auto_return: "approved",
+                // IMPORTANTE: Reemplaza con tu URL real de Render para que el Webhook funcione
+                notification_url: "https://TU_APP_EN_RENDER.onrender.com/webhook"
             },
         });
 
@@ -107,6 +109,48 @@ app.post("/api/create-preference", async (req, res) => {
         console.error("Error al crear preferencia:", error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// --- NUEVO: WEBHOOK DE MERCADO PAGO (AGENDA AUTOMÁTICA) ---
+app.post("/webhook", async (req, res) => {
+    const { query } = req;
+    const topic = query.topic || req.body.type;
+
+    if (topic === "payment") {
+        const paymentId = query.id || req.body.data.id;
+
+        try {
+            const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            });
+            const paymentData = await paymentResponse.json();
+
+            if (paymentData.status === "approved") {
+                const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
+
+                const partes = fecha.split("-");
+                const diaMesFormulario = `${partes[2]}/${partes[1]}`;
+                const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
+                const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+
+                const sheets = await getSheets();
+                await sheets.spreadsheets.values.append({
+                    spreadsheetId: MASTER_SHEET_ID,
+                    range: "A:E",
+                    valueInputOption: "RAW",
+                    requestBody: {
+                        values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
+                    }
+                });
+
+                console.log(`✅ Pago aprobado y turno agendado para: ${nombre} (${slug})`);
+                delete globalCache[slug]; 
+            }
+        } catch (e) {
+            console.error("❌ Error en Webhook:", e.message);
+        }
+    }
+    res.sendStatus(200);
 });
 
 // 1. REGISTRO
