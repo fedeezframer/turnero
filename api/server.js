@@ -111,7 +111,6 @@ app.post("/update-settings", async (req, res) => {
                 business_name: business_name, 
                 precio: parseInt(precio),
                 duracion_turno: parseInt(duracion_turno),
-                // Aseguramos que los nombres coincidan con tu SQL Editor
                 hora_inicio_jornada: h_ini_j,
                 hora_fin_jornada: h_fin_j,
                 descanso_inicio: d_ini,
@@ -215,7 +214,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 7. ADMIN STATS & CONFIG (Mapeo corregido para Framer)
+// 7. ADMIN STATS & CONFIG (Mapeo corregido)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -284,10 +283,10 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 businessName: user.business_name || user.slug,
                 config: {
                     duracion: parseInt(user.duracion_turno) || 30,
-                    h_ini_j: user.hora_inicio_jornada || "09:00",
-                    h_fin_j: user.hora_fin_jornada || "20:00",
-                    d_ini: user.descanso_inicio || "13:00",
-                    d_fin: user.descanso_fin || "15:00",
+                    h_ini_j: user.hora_inicio_jornada,
+                    h_fin_j: user.hora_fin_jornada,
+                    d_ini: user.descanso_inicio,
+                    d_fin: user.descanso_fin,
                     precio: user.precio || 0
                 },
                 turnosLista: turnosLista.sort((a, b) => {
