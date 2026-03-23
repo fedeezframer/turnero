@@ -287,7 +287,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     h_ini_j: user.hora_inicio_jornada || "09:00",
                     h_fin_j: user.hora_fin_jornada || "20:00",
                     d_ini: user.descanso_inicio || "13:00",
-                    d_fin: user.descanso_fin || "13:00",
+                    d_fin: user.descanso_fin || "15:00",
                     precio: user.precio || 0
                 },
                 turnosLista: turnosLista.sort((a, b) => {
