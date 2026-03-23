@@ -66,7 +66,7 @@ app.post("/register", async (req, res) => {
             hora_inicio_jornada: '09:00',
             hora_fin_jornada: '20:00',
             descanso_inicio: '13:00',
-            descanso_fin: '14:00'
+            descanso_fin: '15:00'
         }]);
 
         if (supabaseError) throw supabaseError;
