@@ -17,8 +17,9 @@ app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// --- CACHÉ SISTEMA ---
 const globalCache = {}; 
-const CACHE_DURATION = 30000; 
+const CACHE_DURATION = 20000; // 20 segundos
 
 // --- UTILIDADES ---
 const getCleanSlug = (rawSlug) => {
@@ -119,6 +120,7 @@ app.post("/update-settings", async (req, res) => {
 
         if (error) throw error;
 
+        // Limpiamos el caché para que el cambio se vea YA en el frontend
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) {
@@ -213,7 +215,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 7. ADMIN STATS
+// 7. ADMIN STATS & CONFIG (Mapeo corregido para Framer)
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -223,7 +225,12 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 
     try {
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
+        const { data: user, error: userError } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
+        
+        if (userError || !user) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
+
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: MASTER_SHEET_ID, 
@@ -271,19 +278,21 @@ app.get("/admin-stats/:slug", async (req, res) => {
             stats: {
                 turnosHoy,
                 turnosMes: turnosMesActual,
-                ingresosEstimados: turnosMesActual * (user.precio || 10000),
-                promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 10000)) / diaHoyNum) : 0,
+                ingresosEstimados: turnosMesActual * (user.precio || 0),
+                promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
                 config: {
-                    duracion: user.duracion_turno,
-                    h_ini_j: user.hora_inicio_jornada,
-                    h_fin_j: user.hora_fin_jornada,
-                    d_ini: user.descanso_inicio,
-                    d_fin: user.descanso_fin,
-                    precio: user.precio
+                    duracion: parseInt(user.duracion_turno) || 30,
+                    h_ini_j: user.hora_inicio_jornada || "09:00",
+                    h_fin_j: user.hora_fin_jornada || "20:00",
+                    d_ini: user.descanso_inicio || "13:00",
+                    d_fin: user.descanso_fin || "13:00",
+                    precio: user.precio || 0
                 },
-                turnosLista: turnosLista.sort((a, b) => new Date(a.fecha + "T" + a.hora) - new Date(b.fecha + "T" + b.hora))
+                turnosLista: turnosLista.sort((a, b) => {
+                    return a.hora.localeCompare(b.hora);
+                })
             }
         };
 
@@ -338,4 +347,4 @@ app.post("/cancel-appointment", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Servidor en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
