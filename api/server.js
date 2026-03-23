@@ -46,7 +46,7 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// 1. REGISTRO: Solo guarda en Supabase
+// 1. REGISTRO: Ahora incluye los campos de horario por defecto
 app.post("/register", async (req, res) => {
     try {
         const { usuario, email, business_name, password, precio } = req.body;
@@ -60,7 +60,12 @@ app.post("/register", async (req, res) => {
             business_name: business_name || cleanSlug, 
             password: String(password), 
             sheet_id: MASTER_SHEET_ID,
-            precio: parseInt(precio) || 10000 
+            precio: parseInt(precio) || 10000,
+            duracion_turno: 30,
+            hora_inicio_manana: '09:00',
+            hora_fin_manana: '13:00',
+            hora_inicio_tarde: '16:00',
+            hora_fin_tarde: '20:00'
         }]);
 
         if (supabaseError) throw supabaseError;
@@ -89,23 +94,31 @@ app.get("/verify-session", async (req, res) => {
     }
 });
 
-// 3. ACTUALIZAR CONFIGURACIÓN (Settings del Barbero)
+// 3. ACTUALIZAR CONFIGURACIÓN: Ahora guarda horarios y duración
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, business_name, precio } = req.body;
+        const { 
+            slug, business_name, precio, 
+            duracion_turno, h_ini_m, h_fin_m, h_ini_t, h_fin_t 
+        } = req.body;
+        
         const cleanSlug = getCleanSlug(slug);
 
         const { error } = await supabase
             .from('usuarios')
             .update({ 
                 business_name: business_name, 
-                precio: parseInt(precio) 
+                precio: parseInt(precio),
+                duracion_turno: parseInt(duracion_turno),
+                hora_inicio_manana: h_ini_m,
+                hora_fin_manana: h_fin_m,
+                hora_inicio_tarde: h_ini_t,
+                hora_fin_tarde: h_fin_t
             })
             .eq('slug', cleanSlug);
 
         if (error) throw error;
 
-        // Limpiamos cache para que las stats se actualicen con el nuevo precio/nombre
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) {
@@ -262,6 +275,15 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 10000)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
+                // Agregamos la config del perfil para que los Settings la lean de acá
+                config: {
+                    duracion: user.duracion_turno,
+                    h_ini_m: user.hora_inicio_manana,
+                    h_fin_m: user.hora_fin_manana,
+                    h_ini_t: user.hora_inicio_tarde,
+                    h_fin_t: user.hora_fin_tarde,
+                    precio: user.precio
+                },
                 turnosLista: turnosLista.sort((a, b) => new Date(a.fecha + "T" + a.hora) - new Date(b.fecha + "T" + b.hora))
             }
         };
