@@ -117,11 +117,9 @@ app.post("/api/create-preference", async (req, res) => {
 
 // --- NUEVO: OAUTH CALLBACK (VINCULACIÓN ESTILO TIENDANUBE) ---
 app.get("/oauth-callback", async (req, res) => {
-    const { code, slug } = req.query;
+    const { code, slug } = req.query; // 'slug' lo pasás vos en el link de vinculación
 
-    if (!code || !slug) {
-        return res.status(400).send("Código de autorización o slug faltante.");
-    }
+    if (!code || !slug) return res.status(400).send("Faltan parámetros.");
 
     try {
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
@@ -139,6 +137,7 @@ app.get("/oauth-callback", async (req, res) => {
         const data = await response.json();
 
         if (data.access_token) {
+            // Guardamos el access_token del VENDEDOR en su fila de Supabase
             const { error } = await supabase
                 .from('usuarios')
                 .update({ mp_access_token: data.access_token })
@@ -146,10 +145,9 @@ app.get("/oauth-callback", async (req, res) => {
 
             if (error) throw error;
 
-            // Redirigir al dashboard de Framer con éxito
+            // Redirigir al usuario de vuelta a su dashboard con éxito
             res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
         } else {
-            console.error("Error en intercambio de token:", data);
             res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
