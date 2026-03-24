@@ -3,7 +3,7 @@ import cors from "cors";
 import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
-import fetch from "node-fetch"; // Asegurate de tener node-fetch instalado o usa el fetch nativo de Node 18+
+import fetch from "node-fetch"; 
 
 const app = express();
 
@@ -57,7 +57,6 @@ app.post("/api/create-preference", async (req, res) => {
 
         const { data: user, error: userError } = await supabase
             .from('usuarios')
-            .withConverter(null)
             .select('precio, business_name, mp_access_token')
             .eq('slug', cleanSlug)
             .single();
@@ -96,7 +95,7 @@ app.post("/api/create-preference", async (req, res) => {
                     hora: hora,
                     slug: cleanSlug,
                     precio: precioReal,
-                    vendedor_token: user.mp_access_token // Guardamos el token para el webhook
+                    vendedor_token: user.mp_access_token 
                 },
                 back_urls: {
                     success: "https://dreamwebtesttemplate.framer.website/success",
@@ -115,8 +114,8 @@ app.post("/api/create-preference", async (req, res) => {
     }
 });
 
+// --- 0.1 MERCADO PAGO: OAUTH CALLBACK ---
 app.get("/oauth-callback", async (req, res) => {
-    // 1. Recibimos el código y el 'state' (que es nuestro slug)
     const { code, state: slug } = req.query; 
 
     if (!code || !slug) {
@@ -124,7 +123,6 @@ app.get("/oauth-callback", async (req, res) => {
     }
 
     try {
-        // 2. Intercambiamos el código por el Access Token real
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -140,43 +138,21 @@ app.get("/oauth-callback", async (req, res) => {
         const data = await response.json();
 
         if (data.access_token) {
-            // 3. ¡ACÁ ESTÁ LA MAGIA! 
-            // Usamos el 'slug' que recuperamos del 'state' para saber A QUIÉN actualizar
             const { error } = await supabase
                 .from('usuarios')
-                .update({ mp_access_token: data.access_token }) // Guardamos su token personal
-                .eq('slug', slug); // Lo filtramos por su slug único
-
-            if (error) throw error;
-
-            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
-        } else {
-            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
-        }
-    } catch (e) {
-        res.status(500).send("Error vinculando la cuenta.");
-    }
-});
-
-        const data = await response.json();
-
-        if (data.access_token) {
-            // Guardamos el access_token del VENDEDOR en su fila de Supabase
-            const { error } = await supabase
-                .from('usuarios')
-                .update({ mp_access_token: data.access_token })
+                .update({ mp_access_token: data.access_token }) 
                 .eq('slug', slug);
 
             if (error) throw error;
 
-            // Redirigir al usuario de vuelta a su dashboard con éxito
             res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
         } else {
+            console.error("Error de MP al obtener token:", data);
             res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
         console.error("Error OAuth:", error);
-        res.status(500).send("Error vinculando cuenta.");
+        res.status(500).send("Error vinculando la cuenta.");
     }
 });
 
@@ -189,8 +165,6 @@ app.post("/webhook", async (req, res) => {
         const paymentId = query.id || req.body.data.id;
 
         try {
-            // Buscamos el pago usando el token maestro para obtener la metadata inicial
-            // (Si MP no permite ver metadata sin el token del vendedor, aquí usamos el fallback del .env)
             const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
@@ -224,7 +198,7 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 });
 
-// 1. REGISTRO (Simplificado para el Dashboard)
+// 1. REGISTRO
 app.post("/register", async (req, res) => {
     try {
         const { usuario, email, password } = req.body;
@@ -239,7 +213,7 @@ app.post("/register", async (req, res) => {
             password: String(password), 
             sheet_id: MASTER_SHEET_ID,
             precio: 10000,
-            mp_access_token: null, // Se vincula después vía OAuth
+            mp_access_token: null,
             duracion_turno: 30,
             hora_inicio_jornada: '09:00',
             hora_fin_jornada: '20:00',
