@@ -115,24 +115,48 @@ app.post("/api/create-preference", async (req, res) => {
     }
 });
 
-// --- NUEVO: OAUTH CALLBACK (VINCULACIÓN ESTILO TIENDANUBE) ---
 app.get("/oauth-callback", async (req, res) => {
-    const { code, slug } = req.query; // 'slug' lo pasás vos en el link de vinculación
+    // 1. Recibimos el código y el 'state' (que es nuestro slug)
+    const { code, state: slug } = req.query; 
 
-    if (!code || !slug) return res.status(400).send("Faltan parámetros.");
+    if (!code || !slug) {
+        return res.status(400).send("No se pudo identificar al usuario o el código es inválido.");
+    }
 
     try {
+        // 2. Intercambiamos el código por el Access Token real
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                client_id: process.env.MP_CLIENT_ID,
+                client_id: "3207083483590663",
                 client_secret: process.env.MP_CLIENT_SECRET,
                 grant_type: "authorization_code",
                 code: code,
                 redirect_uri: "https://framerturnero.onrender.com/oauth-callback"
             })
         });
+
+        const data = await response.json();
+
+        if (data.access_token) {
+            // 3. ¡ACÁ ESTÁ LA MAGIA! 
+            // Usamos el 'slug' que recuperamos del 'state' para saber A QUIÉN actualizar
+            const { error } = await supabase
+                .from('usuarios')
+                .update({ mp_access_token: data.access_token }) // Guardamos su token personal
+                .eq('slug', slug); // Lo filtramos por su slug único
+
+            if (error) throw error;
+
+            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
+        } else {
+            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
+        }
+    } catch (e) {
+        res.status(500).send("Error vinculando la cuenta.");
+    }
+});
 
         const data = await response.json();
 
