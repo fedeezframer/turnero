@@ -62,54 +62,42 @@ app.post("/api/create-preference", async (req, res) => {
             .single();
 
         if (userError || !user) {
-            return res.status(404).json({ error: "No se encontró el negocio para procesar el pago." });
+            return res.status(404).json({ error: "Negocio no encontrado." });
         }
 
+        const precioReal = Number(user.precio) || 0;
+
+        // --- LÓGICA DE PRECIO 0 ---
+        if (precioReal === 0) {
+            // Si es 0, devolvemos un flag especial para que el Frontend sepa qué hacer
+            return res.json({ isFree: true });
+        }
+
+        // Si el precio NO es 0, seguimos con la lógica de MP de siempre
         if (!user.mp_access_token) {
-            return res.status(400).json({ error: "El negocio no tiene configurado Mercado Pago." });
+            return res.status(400).json({ error: "Este negocio requiere pago pero no configuró Mercado Pago." });
         }
 
-        const clientMP = new MercadoPagoConfig({ 
-            accessToken: user.mp_access_token 
-        });
-
+        const clientMP = new MercadoPagoConfig({ accessToken: user.mp_access_token });
         const preference = new Preference(clientMP);
-
-        const precioReal = Number(user.precio) || 5000;
-        const nombreNegocio = user.business_name || cleanSlug;
 
         const response = await preference.create({
             body: {
-                items: [
-                    {
-                        title: `Reserva en ${nombreNegocio}: ${fecha} - ${hora}hs`,
-                        unit_price: precioReal,
-                        quantity: 1,
-                        currency_id: "ARS"
-                    }
-                ],
-                metadata: {
-                    nombre: name,
-                    telefono: phone,
-                    fecha: fecha,
-                    hora: hora,
-                    slug: cleanSlug,
-                    precio: precioReal,
-                    vendedor_token: user.mp_access_token 
-                },
-                back_urls: {
-                    success: "https://dreamwebtesttemplate.framer.website/success",
-                    failure: "https://dreamwebtesttemplate.framer.website/error",
-                    pending: "https://dreamwebtesttemplate.framer.website/error"
-                },
-                auto_return: "approved",
-                notification_url: "https://framerturnero.onrender.com/webhook"
+                items: [{
+                    title: `Reserva: ${fecha} - ${hora}hs`,
+                    unit_price: precioReal,
+                    quantity: 1,
+                    currency_id: "ARS"
+                }],
+                metadata: { nombre: name, telefono: phone, fecha, hora, slug: cleanSlug },
+                notification_url: "https://framerturnero.onrender.com/webhook",
+                back_urls: { success: "https://dreamwebtesttemplate.framer.website/success" },
+                auto_return: "approved"
             },
         });
 
         res.json({ payment_url: response.init_point });
     } catch (error) {
-        console.error("Error al crear preferencia:", error);
         res.status(500).json({ error: error.message });
     }
 });
