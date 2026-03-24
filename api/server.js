@@ -3,6 +3,7 @@ import cors from "cors";
 import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
+import fetch from "node-fetch"; // Asegurate de tener node-fetch instalado o usa el fetch nativo de Node 18+
 
 const app = express();
 
@@ -54,9 +55,9 @@ app.post("/api/create-preference", async (req, res) => {
         const { name, phone, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // Buscamos el precio Y EL TOKEN del cliente en Supabase
         const { data: user, error: userError } = await supabase
             .from('usuarios')
+            .withConverter(null)
             .select('precio, business_name, mp_access_token')
             .eq('slug', cleanSlug)
             .single();
@@ -69,7 +70,6 @@ app.post("/api/create-preference", async (req, res) => {
             return res.status(400).json({ error: "El negocio no tiene configurado Mercado Pago." });
         }
 
-        // Configuramos Mercado Pago con el token del DUEÑO del negocio
         const clientMP = new MercadoPagoConfig({ 
             accessToken: user.mp_access_token 
         });
@@ -95,7 +95,8 @@ app.post("/api/create-preference", async (req, res) => {
                     fecha: fecha,
                     hora: hora,
                     slug: cleanSlug,
-                    precio: precioReal
+                    precio: precioReal,
+                    vendedor_token: user.mp_access_token // Guardamos el token para el webhook
                 },
                 back_urls: {
                     success: "https://dreamwebtesttemplate.framer.website/success",
@@ -114,7 +115,50 @@ app.post("/api/create-preference", async (req, res) => {
     }
 });
 
-// --- WEBHOOK: AGENDA AUTOMÁTICA CON TOKEN DINÁMICO ---
+// --- NUEVO: OAUTH CALLBACK (VINCULACIÓN ESTILO TIENDANUBE) ---
+app.get("/oauth-callback", async (req, res) => {
+    const { code, slug } = req.query;
+
+    if (!code || !slug) {
+        return res.status(400).send("Código de autorización o slug faltante.");
+    }
+
+    try {
+        const response = await fetch("https://api.mercadopago.com/oauth/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                client_id: process.env.MP_CLIENT_ID,
+                client_secret: process.env.MP_CLIENT_SECRET,
+                grant_type: "authorization_code",
+                code: code,
+                redirect_uri: "https://framerturnero.onrender.com/oauth-callback"
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.access_token) {
+            const { error } = await supabase
+                .from('usuarios')
+                .update({ mp_access_token: data.access_token })
+                .eq('slug', slug);
+
+            if (error) throw error;
+
+            // Redirigir al dashboard de Framer con éxito
+            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
+        } else {
+            console.error("Error en intercambio de token:", data);
+            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
+        }
+    } catch (error) {
+        console.error("Error OAuth:", error);
+        res.status(500).send("Error vinculando cuenta.");
+    }
+});
+
+// --- WEBHOOK: ACTUALIZADO PARA MP DINÁMICO ---
 app.post("/webhook", async (req, res) => {
     const { query } = req;
     const topic = query.topic || req.body.type;
@@ -123,19 +167,8 @@ app.post("/webhook", async (req, res) => {
         const paymentId = query.id || req.body.data.id;
 
         try {
-            // 1. Obtenemos el pago de forma genérica primero para ver a qué slug pertenece
-            // Nota: Aquí usamos un token maestro para la consulta inicial o metadata si es posible
-            // Pero lo más seguro es consultar la API de MP con el token del negocio
-            // Para simplificar, buscamos en Supabase quién podría ser el dueño
-            // El webhook de MP a veces requiere el token del vendedor para consultar el pago
-            
-            // Estrategia: Buscamos en todos los usuarios el pago (o pasamos el slug en la URL del webhook si fuera necesario)
-            // Por simplicidad en este flujo, intentaremos con el token que configuraste en Render como "fallback" 
-            // o mejor, buscamos el pago directamente si tenemos el token del vendedor.
-            
-            // Para que el webhook sea 100% efectivo en modo SaaS, Mercado Pago envía el user_id del vendedor.
-            // Por ahora, procesaremos el pago asumiendo que el ID es consultable:
-            
+            // Buscamos el pago usando el token maestro para obtener la metadata inicial
+            // (Si MP no permite ver metadata sin el token del vendedor, aquí usamos el fallback del .env)
             const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
@@ -159,7 +192,7 @@ app.post("/webhook", async (req, res) => {
                     }
                 });
 
-                console.log(`✅ Pago aprobado y turno agendado para: ${nombre} (${slug})`);
+                console.log(`✅ Pago aprobado y agendado: ${nombre} (${slug})`);
                 delete globalCache[slug]; 
             }
         } catch (e) {
@@ -169,10 +202,10 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 });
 
-// 1. REGISTRO
+// 1. REGISTRO (Simplificado para el Dashboard)
 app.post("/register", async (req, res) => {
     try {
-        const { usuario, email, business_name, password, precio, mp_token } = req.body;
+        const { usuario, email, password } = req.body;
         if (!usuario || !password || !email) return res.status(400).json({ error: "Faltan datos." });
 
         const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -180,11 +213,11 @@ app.post("/register", async (req, res) => {
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email,
-            business_name: business_name || cleanSlug, 
+            business_name: cleanSlug, 
             password: String(password), 
             sheet_id: MASTER_SHEET_ID,
-            precio: parseInt(precio) || 10000,
-            mp_access_token: mp_token || null,
+            precio: 10000,
+            mp_access_token: null, // Se vincula después vía OAuth
             duracion_turno: 30,
             hora_inicio_jornada: '09:00',
             hora_fin_jornada: '20:00',
@@ -218,11 +251,11 @@ app.get("/verify-session", async (req, res) => {
     }
 });
 
-// 3. ACTUALIZAR CONFIGURACIÓN (Incluye el Token)
+// 3. ACTUALIZAR CONFIGURACIÓN
 app.post("/update-settings", async (req, res) => {
     try {
         const { 
-            slug, business_name, precio, mp_token,
+            slug, business_name, precio,
             duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin 
         } = req.body;
         
@@ -233,7 +266,6 @@ app.post("/update-settings", async (req, res) => {
             .update({ 
                 business_name: business_name, 
                 precio: parseInt(precio),
-                mp_access_token: mp_token,
                 duracion_turno: parseInt(duracion_turno),
                 hora_inicio_jornada: h_ini_j,
                 hora_fin_jornada: h_fin_j,
@@ -412,7 +444,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     d_ini: user.descanso_inicio,
                     d_fin: user.descanso_fin,
                     precio: user.precio || 0,
-                    mp_token: user.mp_access_token // Devolvemos el token para el admin
+                    mp_status: user.mp_access_token ? "Conectado" : "Desconectado"
                 },
                 turnosLista: turnosLista.sort((a, b) => {
                     return a.hora.localeCompare(b.hora);
