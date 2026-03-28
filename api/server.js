@@ -91,7 +91,7 @@ app.post("/api/create-preference", async (req, res) => {
                 }],
                 metadata: { nombre: name, telefono: phone, fecha, hora, slug: cleanSlug },
                 notification_url: "https://framerturnero.onrender.com/webhook",
-                back_urls: { success: "https://dreamwebtesttemplate.framer.website/success" },
+                back_urls: { success: "https://negosocio.framer.website/success" },
                 auto_return: "approved"
             },
         });
