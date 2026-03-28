@@ -133,10 +133,10 @@ app.get("/oauth-callback", async (req, res) => {
 
             if (error) throw error;
 
-            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_success`);
+            res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
         } else {
             console.error("Error de MP al obtener token:", data);
-            res.redirect(`https://dreamwebtesttemplate.framer.website/dashboard?status=mp_error`);
+            res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
         console.error("Error OAuth:", error);
