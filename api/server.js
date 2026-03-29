@@ -4,11 +4,16 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
 import fetch from "node-fetch"; 
+import { Resend } from 'resend';
 
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Guardamos los registros temporales antes de verificar (Email -> Datos + Código)
+const pendingRegistrations = {};
 
 app.use(cors({
     origin: '*',
@@ -67,13 +72,10 @@ app.post("/api/create-preference", async (req, res) => {
 
         const precioReal = Number(user.precio) || 0;
 
-        // --- LÓGICA DE PRECIO 0 ---
         if (precioReal === 0) {
-            // Si es 0, devolvemos un flag especial para que el Frontend sepa qué hacer
             return res.json({ isFree: true });
         }
 
-        // Si el precio NO es 0, seguimos con la lógica de MP de siempre
         if (!user.mp_access_token) {
             return res.status(400).json({ error: "Este negocio requiere pago pero no configuró Mercado Pago." });
         }
@@ -144,32 +146,58 @@ app.get("/oauth-callback", async (req, res) => {
     }
 });
 
+// --- WEBHOOK UNIFICADO (TURNOS Y SUSCRIPCIONES) ---
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
     // 1. SI ES UN PAGO DE TURNO (Clientes de tus clientes)
-    // Estos vienen con topic=payment o type=payment
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data.id;
-        console.log("Processing business payment...");
-        // ... (Acá va tu lógica actual de Sheets y Supabase para turnos)
+        console.log("Procesando pago de turno...");
+
+        try {
+            const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            });
+            const paymentData = await paymentResponse.json();
+
+            if (paymentData.status === "approved") {
+                const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
+                const partes = fecha.split("-");
+                const diaMesFormulario = `${partes[2]}/${partes[1]}`;
+                const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
+                const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+
+                const sheets = await getSheets();
+                await sheets.spreadsheets.values.append({
+                    spreadsheetId: MASTER_SHEET_ID,
+                    range: "A:E",
+                    valueInputOption: "RAW",
+                    requestBody: {
+                        values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
+                    }
+                });
+
+                console.log(`✅ Pago aprobado y agendado: ${nombre} (${slug})`);
+                delete globalCache[slug]; 
+            }
+        } catch (e) {
+            console.error("❌ Error en Webhook Turnos:", e.message);
+        }
     }
 
     // 2. SI ES TU SUSCRIPCIÓN PREMIUM (Gente pagándote a vos)
-    // Estos vienen con un type específico de suscripción
     if (body.type === "subscription_preapproval") {
         const subscriptionId = body.data.id;
-        console.log("Processing YOUR Premium subscription...");
+        console.log("Procesando Suscripción Premium Propia...");
         
         try {
-            // Consultás con TU token maestro (el de las variables de entorno)
             const response = await fetch(`https://api.mercadopago.com/preapproval/${subscriptionId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
             const subData = await response.json();
 
             if (subData.status === "authorized") {
-                // El email del que pagó el Premium
                 const payerEmail = subData.payer_email;
                 
                 await supabase
@@ -177,22 +205,56 @@ app.post("/webhook", async (req, res) => {
                     .update({ plan: 'premium' })
                     .eq('email', payerEmail);
                     
-                console.log(`✅ ¡Suscripción Premium activa para ${payerEmail}!`);
+                console.log(`⭐ ¡Suscripción Premium activa para ${payerEmail}!`);
             }
         } catch (e) {
-            console.error("Error en tu suscripción:", e);
+            console.error("❌ Error en Webhook Premium:", e.message);
         }
     }
 
     res.sendStatus(200);
 });
 
-// 1. REGISTRO
-app.post("/register", async (req, res) => {
+// --- LÓGICA DE VERIFICACIÓN POR MAIL ---
+
+// 1. SOLICITAR CÓDIGO (Plan Gratis)
+app.post("/api/request-verification", async (req, res) => {
     try {
         const { usuario, email, password } = req.body;
-        if (!usuario || !password || !email) return res.status(400).json({ error: "Faltan datos." });
+        if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
 
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        pendingRegistrations[email] = {
+            data: { usuario, email, password },
+            code: code,
+            expires: Date.now() + 600000 // 10 minutos
+        };
+
+        await resend.emails.send({
+            from: 'NegoSocio <onboarding@resend.dev>',
+            to: email,
+            subject: 'Tu código de activación',
+            html: `<p>¡Hola! Tu código para activar NegoSocio es: <strong>${code}</strong></p>`
+        });
+        
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. VERIFICAR CÓDIGO Y CREAR EN SUPABASE
+app.post("/api/verify-and-register", async (req, res) => {
+    try {
+        const { email, code } = req.body;
+        const pending = pendingRegistrations[email];
+
+        if (!pending || pending.code !== code || Date.now() > pending.expires) {
+            return res.status(400).json({ error: "Código inválido o expirado." });
+        }
+
+        const { usuario, password } = pending.data;
         const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
@@ -207,17 +269,21 @@ app.post("/register", async (req, res) => {
             hora_inicio_jornada: '09:00',
             hora_fin_jornada: '20:00',
             descanso_inicio: '13:00',
-            descanso_fin: '15:00'
+            descanso_fin: '15:00',
+            plan: 'gratis'
         }]);
 
         if (supabaseError) throw supabaseError;
+
+        delete pendingRegistrations[email];
         res.json({ success: true, slug: cleanSlug });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. VERIFICAR SESIÓN
+// --- MÉTODOS DE ADMIN Y TURNOS ---
+
 app.get("/verify-session", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.u);
@@ -236,7 +302,6 @@ app.get("/verify-session", async (req, res) => {
     }
 });
 
-// 3. ACTUALIZAR CONFIGURACIÓN
 app.post("/update-settings", async (req, res) => {
     try {
         const { 
@@ -268,7 +333,6 @@ app.post("/update-settings", async (req, res) => {
     }
 });
 
-// 4. OBTENER OCUPADOS
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
@@ -289,7 +353,6 @@ app.get("/get-occupied", async (req, res) => {
     }
 });
 
-// 5. CREAR RESERVA (Directa sin pago)
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
@@ -339,7 +402,6 @@ app.post("/create-booking", async (req, res) => {
     }
 });
 
-// 6. LOGIN
 app.post("/login", async (req, res) => {
     try {
         const slug = getCleanSlug(req.body.slug);
@@ -355,7 +417,6 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// 7. ADMIN STATS & CONFIG
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -429,7 +490,8 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     d_ini: user.descanso_inicio,
                     d_fin: user.descanso_fin,
                     precio: user.precio || 0,
-                    mp_status: user.mp_access_token ? "Conectado" : "Desconectado"
+                    mp_status: user.mp_access_token ? "Conectado" : "Desconectado",
+                    plan: user.plan || 'gratis'
                 },
                 turnosLista: turnosLista.sort((a, b) => {
                     return a.hora.localeCompare(b.hora);
@@ -444,7 +506,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
     }
 });
 
-// 8. CANCELAR
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
