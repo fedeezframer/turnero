@@ -54,6 +54,11 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
+// --- RUTA RAÍZ (Para evitar el Cannot GET /) ---
+app.get("/", (req, res) => {
+    res.send("🚀 NegoSocio API Server Is Online");
+});
+
 // --- 0. MERCADO PAGO: CREAR PREFERENCIA DINÁMICA ---
 app.post("/api/create-preference", async (req, res) => {
     try {
@@ -221,7 +226,17 @@ app.post("/webhook", async (req, res) => {
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { usuario, email, password } = req.body;
-        if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
+        
+        // LOGS PARA DEPURACIÓN EN RENDER
+        console.log(">>> Solicitud de verificación recibida");
+        console.log(">>> Usuario:", usuario);
+        console.log(">>> Email:", email);
+        console.log(">>> Pass recibida:", password ? "SI" : "NO");
+
+        if (!email || !usuario) {
+            console.log("!!! Error: Faltan datos en el body");
+            return res.status(400).json({ error: "Faltan datos obligatorios." });
+        }
 
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         
@@ -231,15 +246,31 @@ app.post("/api/request-verification", async (req, res) => {
             expires: Date.now() + 600000 // 10 minutos
         };
 
-        await resend.emails.send({
+        console.log(">>> Código generado:", code, "para:", email);
+
+        const emailResponse = await resend.emails.send({
             from: 'NegoSocio <onboarding@resend.dev>',
             to: email,
             subject: 'Tu código de activación',
-            html: `<p>¡Hola! Tu código para activar NegoSocio es: <strong>${code}</strong></p>`
+            html: `
+                <div style="font-family: sans-serif; padding: 20px;">
+                    <h2>¡Hola ${usuario}!</h2>
+                    <p>Tu código para activar tu cuenta en NegoSocio es:</p>
+                    <h1 style="color: #2F8A2F;">${code}</h1>
+                    <p>Este código expira en 10 minutos.</p>
+                </div>
+            `
         });
         
+        if (emailResponse.error) {
+            console.error("!!! Error de Resend:", emailResponse.error);
+            return res.status(500).json({ error: "Error al enviar el mail." });
+        }
+
+        console.log("✅ Mail enviado correctamente");
         res.json({ success: true });
     } catch (e) {
+        console.error("!!! Error Interno:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
@@ -250,17 +281,20 @@ app.post("/api/verify-and-register", async (req, res) => {
         const { email, code } = req.body;
         const pending = pendingRegistrations[email];
 
+        console.log(`>>> Verificando código para ${email}. Código ingresado: ${code}`);
+
         if (!pending || pending.code !== code || Date.now() > pending.expires) {
             return res.status(400).json({ error: "Código inválido o expirado." });
         }
 
         const { usuario, password } = pending.data;
+        // Creamos un slug limpio a partir del nombre de usuario
         const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
         const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
             slug: cleanSlug, 
             email,
-            business_name: cleanSlug, 
+            business_name: usuario, 
             password: String(password), 
             sheet_id: MASTER_SHEET_ID,
             precio: 10000,
@@ -273,9 +307,13 @@ app.post("/api/verify-and-register", async (req, res) => {
             plan: 'gratis'
         }]);
 
-        if (supabaseError) throw supabaseError;
+        if (supabaseError) {
+            console.error("!!! Error de Supabase:", supabaseError);
+            throw supabaseError;
+        }
 
         delete pendingRegistrations[email];
+        console.log(`✅ Usuario ${cleanSlug} creado con éxito.`);
         res.json({ success: true, slug: cleanSlug });
     } catch (e) {
         res.status(500).json({ error: e.message });
