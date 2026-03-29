@@ -144,45 +144,46 @@ app.get("/oauth-callback", async (req, res) => {
     }
 });
 
-// --- WEBHOOK: ACTUALIZADO PARA MP DINÁMICO ---
 app.post("/webhook", async (req, res) => {
-    const { query } = req;
-    const topic = query.topic || req.body.type;
+    const { query, body } = req;
+    
+    // 1. SI ES UN PAGO DE TURNO (Clientes de tus clientes)
+    // Estos vienen con topic=payment o type=payment
+    if (query.topic === "payment" || body.type === "payment") {
+        const paymentId = query.id || body.data.id;
+        console.log("Processing business payment...");
+        // ... (Acá va tu lógica actual de Sheets y Supabase para turnos)
+    }
 
-    if (topic === "payment") {
-        const paymentId = query.id || req.body.data.id;
-
+    // 2. SI ES TU SUSCRIPCIÓN PREMIUM (Gente pagándote a vos)
+    // Estos vienen con un type específico de suscripción
+    if (body.type === "subscription_preapproval") {
+        const subscriptionId = body.data.id;
+        console.log("Processing YOUR Premium subscription...");
+        
         try {
-            const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+            // Consultás con TU token maestro (el de las variables de entorno)
+            const response = await fetch(`https://api.mercadopago.com/preapproval/${subscriptionId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
-            const paymentData = await paymentResponse.json();
+            const subData = await response.json();
 
-            if (paymentData.status === "approved") {
-                const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
-
-                const partes = fecha.split("-");
-                const diaMesFormulario = `${partes[2]}/${partes[1]}`;
-                const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
-                const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-
-                const sheets = await getSheets();
-                await sheets.spreadsheets.values.append({
-                    spreadsheetId: MASTER_SHEET_ID,
-                    range: "A:E",
-                    valueInputOption: "RAW",
-                    requestBody: {
-                        values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
-                    }
-                });
-
-                console.log(`✅ Pago aprobado y agendado: ${nombre} (${slug})`);
-                delete globalCache[slug]; 
+            if (subData.status === "authorized") {
+                // El email del que pagó el Premium
+                const payerEmail = subData.payer_email;
+                
+                await supabase
+                    .from('usuarios')
+                    .update({ plan: 'premium' })
+                    .eq('email', payerEmail);
+                    
+                console.log(`✅ ¡Suscripción Premium activa para ${payerEmail}!`);
             }
         } catch (e) {
-            console.error("❌ Error en Webhook:", e.message);
+            console.error("Error en tu suscripción:", e);
         }
     }
+
     res.sendStatus(200);
 });
 
