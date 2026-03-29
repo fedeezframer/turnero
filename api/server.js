@@ -9,7 +9,7 @@ const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-// URL de tu Web App de Google Apps Script (la que reemplaza a Resend)
+// URL de tu Web App de Google Apps Script
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwCIzLEl6SP_nGOudLAzJx3KxdSZdHHPwoO8b8KRjBVrb6gEeT8dXuV60yHWT-8TYzh/exec"; 
 
 app.use(cors({
@@ -210,10 +210,10 @@ app.post("/api/request-verification", async (req, res) => {
         const { usuario, email, password } = req.body;
         if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
 
-        // Llamamos al Script de Google para generar código y guardar el intento
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
-            body: JSON.stringify({ action: "createAttempt", usuario, email, password })
+            headers: { "Content-Type": "text/plain" }, // Google Script prefiere esto a veces
+            body: JSON.stringify({ action: "createAttempt", usuario, email: email.trim().toLowerCase(), password })
         });
         const result = await googleRes.json();
         
@@ -223,6 +223,7 @@ app.post("/api/request-verification", async (req, res) => {
             throw new Error("Error al procesar el intento en Google Sheets");
         }
     } catch (e) {
+        console.error("Error en request-verification:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
@@ -230,21 +231,40 @@ app.post("/api/request-verification", async (req, res) => {
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { email, code } = req.body;
+        if (!email || !code) return res.status(400).json({ error: "Email y código requeridos." });
+
+        console.log(`Verificando para: ${email} con código: ${code}`);
 
         // Validamos el código contra el Script de Google
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
-            body: JSON.stringify({ action: "verifyCode", email, code })
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({ 
+                action: "verifyCode", 
+                email: email.trim().toLowerCase(), 
+                code: code.toString().trim() 
+            })
         });
+
         const result = await googleRes.json();
+        console.log("Resultado de Google Apps Script:", result);
 
         if (result.status === "valid") {
             const { usuario, password } = result;
-            const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            
+            // Generación de slug ultra-limpio
+            const cleanSlug = usuario
+                .toLowerCase()
+                .trim()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-')
+                .replace(/[^a-z0-9-]/g, '');
 
-            const { error } = await supabase.from('usuarios').insert([{ 
+            // Insertar en Supabase
+            const { error: insertError } = await supabase.from('usuarios').insert([{ 
                 slug: cleanSlug, 
-                email, 
+                email: email.trim().toLowerCase(), 
                 business_name: usuario, 
                 password: String(password), 
                 sheet_id: MASTER_SHEET_ID, 
@@ -258,17 +278,22 @@ app.post("/api/verify-and-register", async (req, res) => {
                 plan: 'gratis'
             }]);
 
-            if (error) throw error;
+            if (insertError) {
+                console.error("Error al insertar en Supabase:", insertError);
+                return res.status(500).json({ error: "Error al crear la cuenta en la base de datos." });
+            }
+
             res.json({ success: true, slug: cleanSlug });
         } else {
-            res.status(400).json({ error: "Código incorrecto o expirado." });
+            res.status(400).json({ success: false, error: "Código incorrecto o expirado." });
         }
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error("Error fatal en verify-and-register:", e.message);
+        res.status(500).json({ error: "Error interno del servidor." });
     }
 });
 
-// --- MÉTODOS DE ADMIN Y TURNOS (TODA TU LÓGICA DE 590 LÍNEAS) ---
+// --- MÉTODOS DE ADMIN Y TURNOS ---
 
 app.get("/verify-session", async (req, res) => {
     try {
