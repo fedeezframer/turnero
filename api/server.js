@@ -10,7 +10,7 @@ const app = express();
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
 // URL de tu Web App de Google Apps Script (la que reemplaza a Resend)
-const APPS_SCRIPT_URL = "https://script.google.com/u/0/home/projects/167mH5BxGU1y8QIajyn0zPj3KCtzyAfKktQ0Rm0R7Fad_UVbc-BbKDUyz/edit?pli=1"; 
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwCIzLEl6SP_nGOudLAzJx3KxdSZdHHPwoO8b8KRjBVrb6gEeT8dXuV60yHWT-8TYzh/exec"; 
 
 app.use(cors({
     origin: '*',
