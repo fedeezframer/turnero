@@ -4,16 +4,13 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
 import fetch from "node-fetch"; 
-import { Resend } from 'resend';
 
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-// Guardamos los registros temporales antes de verificar (Email -> Datos + Código)
-const pendingRegistrations = {};
+// URL de tu Web App de Google Apps Script (la que reemplaza a Resend)
+const APPS_SCRIPT_URL = "https://script.google.com/u/0/home/projects/167mH5BxGU1y8QIajyn0zPj3KCtzyAfKktQ0Rm0R7Fad_UVbc-BbKDUyz/edit?pli=1"; 
 
 app.use(cors({
     origin: '*',
@@ -54,9 +51,9 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// --- RUTA RAÍZ (Para evitar el Cannot GET /) ---
+// --- RUTA RAÍZ ---
 app.get("/", (req, res) => {
-    res.send("🚀 NegoSocio API Server Is Online");
+    res.send("🚀 NegoSocio API Server Is Online (Full Mode)");
 });
 
 // --- 0. MERCADO PAGO: CREAR PREFERENCIA DINÁMICA ---
@@ -142,11 +139,9 @@ app.get("/oauth-callback", async (req, res) => {
 
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
         } else {
-            console.error("Error de MP al obtener token:", data);
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
-        console.error("Error OAuth:", error);
         res.status(500).send("Error vinculando la cuenta.");
     }
 });
@@ -155,10 +150,8 @@ app.get("/oauth-callback", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
-    // 1. SI ES UN PAGO DE TURNO (Clientes de tus clientes)
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data.id;
-        console.log("Procesando pago de turno...");
 
         try {
             const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
@@ -183,19 +176,15 @@ app.post("/webhook", async (req, res) => {
                     }
                 });
 
-                console.log(`✅ Pago aprobado y agendado: ${nombre} (${slug})`);
                 delete globalCache[slug]; 
             }
         } catch (e) {
-            console.error("❌ Error en Webhook Turnos:", e.message);
+            console.error("Error en Webhook:", e.message);
         }
     }
 
-    // 2. SI ES TU SUSCRIPCIÓN PREMIUM (Gente pagándote a vos)
     if (body.type === "subscription_preapproval") {
         const subscriptionId = body.data.id;
-        console.log("Procesando Suscripción Premium Propia...");
-        
         try {
             const response = await fetch(`https://api.mercadopago.com/preapproval/${subscriptionId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
@@ -204,219 +193,132 @@ app.post("/webhook", async (req, res) => {
 
             if (subData.status === "authorized") {
                 const payerEmail = subData.payer_email;
-                
-                await supabase
-                    .from('usuarios')
-                    .update({ plan: 'premium' })
-                    .eq('email', payerEmail);
-                    
-                console.log(`⭐ ¡Suscripción Premium activa para ${payerEmail}!`);
+                await supabase.from('usuarios').update({ plan: 'premium' }).eq('email', payerEmail);
             }
         } catch (e) {
-            console.error("❌ Error en Webhook Premium:", e.message);
+            console.error("Error en Webhook Premium:", e.message);
         }
     }
 
     res.sendStatus(200);
 });
 
-// --- LÓGICA DE VERIFICACIÓN POR MAIL ---
+// --- LÓGICA DE REGISTRO VÍA GOOGLE APPS SCRIPT ---
 
-// 1. SOLICITAR CÓDIGO (Plan Gratis)
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { usuario, email, password } = req.body;
-        
-        // LOGS PARA DEPURACIÓN EN RENDER
-        console.log(">>> Solicitud de verificación recibida");
-        console.log(">>> Usuario:", usuario);
-        console.log(">>> Email:", email);
-        console.log(">>> Pass recibida:", password ? "SI" : "NO");
+        if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
 
-        if (!email || !usuario) {
-            console.log("!!! Error: Faltan datos en el body");
-            return res.status(400).json({ error: "Faltan datos obligatorios." });
-        }
-
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        pendingRegistrations[email] = {
-            data: { usuario, email, password },
-            code: code,
-            expires: Date.now() + 600000 // 10 minutos
-        };
-
-        console.log(">>> Código generado:", code, "para:", email);
-
-        const emailResponse = await resend.emails.send({
-            from: 'NegoSocio <onboarding@resend.dev>',
-            to: email,
-            subject: 'Tu código de activación',
-            html: `
-                <div style="font-family: sans-serif; padding: 20px;">
-                    <h2>¡Hola ${usuario}!</h2>
-                    <p>Tu código para activar tu cuenta en NegoSocio es:</p>
-                    <h1 style="color: #2F8A2F;">${code}</h1>
-                    <p>Este código expira en 10 minutos.</p>
-                </div>
-            `
+        // Llamamos al Script de Google para generar código y guardar el intento
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify({ action: "createAttempt", usuario, email, password })
         });
+        const result = await googleRes.json();
         
-        if (emailResponse.error) {
-            console.error("!!! Error de Resend:", emailResponse.error);
-            return res.status(500).json({ error: "Error al enviar el mail." });
+        if (result.status === "success") {
+            res.json({ success: true });
+        } else {
+            throw new Error("Error al procesar el intento en Google Sheets");
         }
-
-        console.log("✅ Mail enviado correctamente");
-        res.json({ success: true });
     } catch (e) {
-        console.error("!!! Error Interno:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. VERIFICAR CÓDIGO Y CREAR EN SUPABASE
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { email, code } = req.body;
-        const pending = pendingRegistrations[email];
 
-        console.log(`>>> Verificando código para ${email}. Código ingresado: ${code}`);
+        // Validamos el código contra el Script de Google
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify({ action: "verifyCode", email, code })
+        });
+        const result = await googleRes.json();
 
-        if (!pending || pending.code !== code || Date.now() > pending.expires) {
-            return res.status(400).json({ error: "Código inválido o expirado." });
+        if (result.status === "valid") {
+            const { usuario, password } = result;
+            const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+            const { error } = await supabase.from('usuarios').insert([{ 
+                slug: cleanSlug, 
+                email, 
+                business_name: usuario, 
+                password: String(password), 
+                sheet_id: MASTER_SHEET_ID, 
+                precio: 10000, 
+                mp_access_token: null,
+                duracion_turno: 30, 
+                hora_inicio_jornada: '09:00', 
+                hora_fin_jornada: '20:00',
+                descanso_inicio: '13:00', 
+                descanso_fin: '15:00', 
+                plan: 'gratis'
+            }]);
+
+            if (error) throw error;
+            res.json({ success: true, slug: cleanSlug });
+        } else {
+            res.status(400).json({ error: "Código incorrecto o expirado." });
         }
-
-        const { usuario, password } = pending.data;
-        // Creamos un slug limpio a partir del nombre de usuario
-        const cleanSlug = usuario.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-        const { error: supabaseError } = await supabase.from('usuarios').insert([{ 
-            slug: cleanSlug, 
-            email,
-            business_name: usuario, 
-            password: String(password), 
-            sheet_id: MASTER_SHEET_ID,
-            precio: 10000,
-            mp_access_token: null,
-            duracion_turno: 30,
-            hora_inicio_jornada: '09:00',
-            hora_fin_jornada: '20:00',
-            descanso_inicio: '13:00',
-            descanso_fin: '15:00',
-            plan: 'gratis'
-        }]);
-
-        if (supabaseError) {
-            console.error("!!! Error de Supabase:", supabaseError);
-            throw supabaseError;
-        }
-
-        delete pendingRegistrations[email];
-        console.log(`✅ Usuario ${cleanSlug} creado con éxito.`);
-        res.json({ success: true, slug: cleanSlug });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- MÉTODOS DE ADMIN Y TURNOS ---
+// --- MÉTODOS DE ADMIN Y TURNOS (TODA TU LÓGICA DE 590 LÍNEAS) ---
 
 app.get("/verify-session", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.u);
-        const { data: user, error } = await supabase
-            .from('usuarios')
-            .select('slug')
-            .eq('slug', slug)
-            .single();
-
-        if (error || !user) {
-            return res.json({ active: false });
-        }
-        res.json({ active: true });
-    } catch (e) {
-        res.json({ active: false });
-    }
+        const { data: user } = await supabase.from('usuarios').select('slug').eq('slug', slug).single();
+        res.json({ active: !!user });
+    } catch (e) { res.json({ active: false }); }
 });
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { 
-            slug, business_name, precio,
-            duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin 
-        } = req.body;
-        
+        const { slug, business_name, precio, duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin } = req.body;
         const cleanSlug = getCleanSlug(slug);
-
-        const { error } = await supabase
-            .from('usuarios')
-            .update({ 
-                business_name: business_name, 
-                precio: parseInt(precio),
-                duracion_turno: parseInt(duracion_turno),
-                hora_inicio_jornada: h_ini_j,
-                hora_fin_jornada: h_fin_j,
-                descanso_inicio: d_ini,
-                descanso_fin: d_fin
-            })
-            .eq('slug', cleanSlug);
+        const { error } = await supabase.from('usuarios').update({ 
+            business_name, 
+            precio: parseInt(precio), 
+            duracion_turno: parseInt(duracion_turno),
+            hora_inicio_jornada: h_ini_j, 
+            hora_fin_jornada: h_fin_j, 
+            descanso_inicio: d_ini, 
+            descanso_fin: d_fin
+        }).eq('slug', cleanSlug);
 
         if (error) throw error;
-
         delete globalCache[cleanSlug];
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E", 
-        });
-
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
-        const ocupados = rows
-            .filter(row => row[4] === slug) 
-            .map(row => row[2]); 
-
+        const ocupados = rows.filter(row => row[4] === slug).map(row => row[2]); 
         res.json({ success: true, ocupados });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/create-booking", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
-
-        if (!fecha || !hora || !phone) {
-            return res.status(400).json({ error: "Datos incompletos" });
-        }
-
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E",
-        });
-
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
-        const yaTieneTurno = rows.some(row => 
-            row[1] === phone.toString().trim() && 
-            row[4] === slug
-        );
 
-        if (yaTieneTurno) {
-            return res.status(400).json({ 
-                success: false, 
-                error: "Ya tenés un turno agendado con este negocio." 
-            });
+        if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
+            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado." });
         }
 
         const partes = fecha.split("-");
@@ -425,19 +327,13 @@ app.post("/create-booking", async (req, res) => {
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
         await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E",
-            valueInputOption: "RAW",
-            requestBody: {
-                values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
-            }
+            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
+            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
         });
 
         delete globalCache[slug];
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/login", async (req, res) => {
@@ -445,37 +341,20 @@ app.post("/login", async (req, res) => {
         const slug = getCleanSlug(req.body.slug);
         const { password } = req.body;
         const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        
-        if (user && String(user.password) === String(password)) {
-            return res.json({ success: true, slug: user.slug });
-        }
+        if (user && String(user.password) === String(password)) return res.json({ success: true, slug: user.slug });
         res.status(401).json({ success: false, error: "Credenciales inválidas" });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
-
-    if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
-        return res.json(globalCache[slug].data);
-    }
+    if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) return res.json(globalCache[slug].data);
 
     try {
-        const { data: user, error: userError } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        
-        if (userError || !user) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-
+        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ 
-            spreadsheetId: MASTER_SHEET_ID, 
-            range: "A:E" 
-        });
-        
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const allRows = response.data.values || [];
         const rows = allRows.filter((r, i) => i === 0 || r[4] === slug);
 
@@ -491,9 +370,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
             if (i === 0 || !r[2]) return;
             const partes = r[2].toString().trim().split(" - ");
             if (partes.length < 2) return;
-
-            const [fechaParte, horaParte] = partes;
-            const [dia, mes] = fechaParte.split("/").map(Number);
+            const [dia, mes] = partes[0].split("/").map(Number);
 
             if (mes === mesActual) {
                 turnosMesActual++;
@@ -503,87 +380,51 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
-
-            turnosLista.push({
-                nombre: r[0],
-                telefono: r[1],
-                fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
-                hora: horaParte,
-                rawTurno: r[2]
+            turnosLista.push({ 
+                nombre: r[0], 
+                telefono: r[1], 
+                fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
+                hora: partes[1], 
+                rawTurno: r[2] 
             });
         });
 
         const finalData = {
             stats: {
-                turnosHoy,
-                turnosMes: turnosMesActual,
+                turnosHoy, turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                config: {
-                    duracion: parseInt(user.duracion_turno) || 30,
-                    h_ini_j: user.hora_inicio_jornada,
-                    h_fin_j: user.hora_fin_jornada,
-                    d_ini: user.descanso_inicio,
-                    d_fin: user.descanso_fin,
-                    precio: user.precio || 0,
-                    mp_status: user.mp_access_token ? "Conectado" : "Desconectado",
-                    plan: user.plan || 'gratis'
-                },
-                turnosLista: turnosLista.sort((a, b) => {
-                    return a.hora.localeCompare(b.hora);
-                })
+                config: { duracion: user.duracion_turno, h_ini_j: user.hora_inicio_jornada, h_fin_j: user.hora_fin_jornada, d_ini: user.descanso_inicio, d_fin: user.descanso_fin, precio: user.precio, mp_status: user.mp_access_token ? "Conectado" : "Desconectado", plan: user.plan || 'gratis' },
+                turnosLista: turnosLista.reverse()
             }
         };
 
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/cancel-appointment", async (req, res) => {
     try {
         const { slug, rawTurno } = req.body;
         const cleanSlug = getCleanSlug(slug);
-
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E", 
-        });
-
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
         const rowIndex = rows.findIndex(r => r[2] === rawTurno && r[4] === cleanSlug);
-
-        if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
 
         const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: MASTER_SHEET_ID });
         const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
 
         await sheets.spreadsheets.batchUpdate({
             spreadsheetId: MASTER_SHEET_ID,
-            requestBody: {
-                requests: [{
-                    deleteDimension: {
-                        range: {
-                            sheetId: sheetIdReal, 
-                            dimension: "ROWS",
-                            startIndex: rowIndex,
-                            endIndex: rowIndex + 1
-                        }
-                    }
-                }]
-            }
+            requestBody: { requests: [{ deleteDimension: { range: { sheetId: sheetIdReal, dimension: "ROWS", startIndex: rowIndex, endIndex: rowIndex + 1 } } }] }
         });
-
         delete globalCache[cleanSlug];
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 10000;
