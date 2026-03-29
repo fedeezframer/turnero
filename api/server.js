@@ -230,66 +230,75 @@ app.post("/api/request-verification", async (req, res) => {
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code } = req.body;
-        if (!email || !code) return res.status(400).json({ error: "Email y código requeridos." });
+        const { 
+            email, code, 
+            // Datos del perfil
+            business_name, phone, precio, duracion_turno, plan,
+            // Datos de horarios que vienen del form de Framer
+            lunes_inicio, lunes_fin, lunes_desc_ini, lunes_desc_fin,
+            martes_inicio, martes_fin, martes_desc_ini, martes_desc_fin,
+            miercoles_inicio, miercoles_fin, miercoles_desc_ini, miercoles_desc_fin,
+            jueves_inicio, jueves_fin, jueves_desc_ini, jueves_desc_fin,
+            viernes_inicio, viernes_fin, viernes_desc_ini, viernes_desc_fin,
+            sabado_inicio, sabado_fin, sabado_desc_ini, sabado_desc_fin,
+            domingo_inicio, domingo_fin, domingo_desc_ini, domingo_desc_fin
+        } = req.body;
 
-        console.log(`Verificando para: ${email} con código: ${code}`);
+        if (!email || !code) return res.status(400).json({ error: "Faltan datos clave." });
 
-        // Validamos el código contra el Script de Google
+        // 1. Validamos el código con Google Scripts
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({ 
-                action: "verifyCode", 
-                email: email.trim().toLowerCase(), 
-                code: code.toString().trim() 
-            })
+            body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
         });
-
         const result = await googleRes.json();
-        console.log("Resultado de Google Apps Script:", result);
 
         if (result.status === "valid") {
-            const { usuario, password } = result;
-            
-            // Generación de slug ultra-limpio
-            const cleanSlug = usuario
-                .toLowerCase()
-                .trim()
-                .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "")
-                .replace(/\s+/g, '-')
-                .replace(/[^a-z0-9-]/g, '');
+            const { usuario, password } = result; // Traemos lo que guardó Google al inicio
 
-            // Insertar en Supabase
+            // 2. Generamos el Slug
+            const cleanSlug = (business_name || usuario)
+                .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+            // 3. ARMAMOS EL OBJETO DE HORARIOS (Estructura JSONB)
+            // Aquí mapeamos lo que viene del form plano al objeto complejo
+            const objetoHorarios = {
+                lunes: { activo: !!lunes_inicio, jornada: [lunes_inicio || "09:00", lunes_fin || "18:00"], descanso: [lunes_desc_ini || "13:00", lunes_desc_fin || "14:00"] },
+                martes: { activo: !!martes_inicio, jornada: [martes_inicio || "09:00", martes_fin || "18:00"], descanso: [martes_desc_ini || "13:00", martes_desc_fin || "14:00"] },
+                miercoles: { activo: !!miercoles_inicio, jornada: [miercoles_inicio || "09:00", miercoles_fin || "18:00"], descanso: [miercoles_desc_ini || "13:00", miercoles_desc_fin || "14:00"] },
+                jueves: { activo: !!jueves_inicio, jornada: [jueves_inicio || "09:00", jueves_fin || "18:00"], descanso: [jueves_desc_ini || "13:00", jueves_desc_fin || "14:00"] },
+                viernes: { activo: !!viernes_inicio, jornada: [viernes_inicio || "09:00", viernes_fin || "18:00"], descanso: [viernes_desc_ini || "13:00", viernes_desc_fin || "14:00"] },
+                sabado: { activo: !!sabado_inicio, jornada: [sabado_inicio || "09:00", sabado_fin || "13:00"], descanso: [sabado_desc_ini || null, sabado_desc_fin || null] },
+                domingo: { activo: !!domingo_inicio, jornada: [domingo_inicio || null, domingo_fin || null], descanso: [null, null] }
+            };
+
+            // 4. Insertamos en Supabase con la nueva estructura
             const { error: insertError } = await supabase.from('usuarios').insert([{ 
                 slug: cleanSlug, 
                 email: email.trim().toLowerCase(), 
-                business_name: usuario, 
+                business_name: business_name || usuario, 
                 password: String(password), 
                 sheet_id: MASTER_SHEET_ID, 
-                precio: 10000, 
-                mp_access_token: null,
-                duracion_turno: 30, 
-                hora_inicio_jornada: '09:00', 
-                hora_fin_jornada: '20:00',
-                descanso_inicio: '13:00', 
-                descanso_fin: '15:00', 
-                plan: 'gratis'
+                precio: parseInt(precio) || 0, 
+                duracion_turno: parseInt(duracion_turno) || 30,
+                horarios: objetoHorarios, // Mandamos el JSON completito
+                plan: plan || 'gratis',    // Si viene del botón de premium, se guarda acá
+                mp_access_token: null
             }]);
 
             if (insertError) {
-                console.error("Error al insertar en Supabase:", insertError);
-                return res.status(500).json({ error: "Error al crear la cuenta en la base de datos." });
+                console.error("Error Supabase:", insertError);
+                return res.status(500).json({ error: "Error en base de datos: " + insertError.message });
             }
 
             res.json({ success: true, slug: cleanSlug });
         } else {
-            res.status(400).json({ success: false, error: "Código incorrecto o expirado." });
+            res.status(400).json({ error: "Código incorrecto o expirado." });
         }
     } catch (e) {
-        console.error("Error fatal en verify-and-register:", e.message);
-        res.status(500).json({ error: "Error interno del servidor." });
+        res.status(500).json({ error: e.message });
     }
 });
 
