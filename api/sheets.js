@@ -7,7 +7,7 @@ const getAuth = () => new JWT({
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-export async function getFullData() {
+export async function getFullData(slug) {
     try {
         const auth = getAuth();
         const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, auth);
@@ -15,19 +15,24 @@ export async function getFullData() {
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
         
-        return rows.map(row => ({
-            turno: row.get("turno"), 
-            phone: row.get("phone"),
-            name: row.get("name")
-        }));
+        // Filtramos por slug para que un negocio no vea los turnos de otro
+        return rows
+            .filter(row => row.get("slug") === slug)
+            .map(row => ({
+                turno: row.get("turno"), 
+                phone: row.get("phone"),
+                name: row.get("name"),
+                semana: row.get("semana"),
+                slug: row.get("slug")
+            }));
     } catch (e) {
         console.error("Error leyendo Sheets:", e.message);
         return [];
     }
 }
 
-export async function getOccupiedSlots() {
-    const data = await getFullData();
+export async function getOccupiedSlots(slug) {
+    const data = await getFullData(slug);
     return data.map(d => d.turno).filter(Boolean);
 }
 
@@ -38,11 +43,11 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // 1. Formateo para la columna "turno" (Lo que ve el barbero)
+        // 1. Formateo para la columna "turno" (Ej: 29/03 - 15:30)
         const [year, month, day] = data.fecha.split("-");
         const turnoFormateado = `${day}/${month} - ${data.hora}`;
 
-        // 2. FECHA DE REGISTRO (Solo fecha para que coincida con el contador de Stats)
+        // 2. FECHA DE REGISTRO (Crucial para las Stats del Admin)
         const ahora = new Date();
         const fechaRegistro = ahora.toLocaleDateString('es-AR', {
             timeZone: 'America/Argentina/Buenos_Aires',
@@ -52,19 +57,14 @@ export async function saveToSheets(data) {
         });
 
         // 3. GUARDAR EN EL SHEETS
+        // Agregamos "slug" para identificar de quién es el turno
         await sheet.addRow({
-            name: data.name,
-            phone: data.phone,
+            name: data.name.trim(),
+            phone: data.phone.toString().trim(),
             turno: turnoFormateado,
-            semana: fechaRegistro // <--- IMPORTANTE: Guardamos "20/03/2026"
+            semana: fechaRegistro,
+            slug: data.slug // <--- NO OLVIDAR ESTO
         });
-
-        return true;
-    } catch (e) {
-        console.error("Error guardando en Sheets:", e.message);
-        return false;
-    }
-}
 
         return true;
     } catch (e) {
