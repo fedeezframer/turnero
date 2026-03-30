@@ -230,25 +230,24 @@ app.post("/api/request-verification", async (req, res) => {
             })
         });
 
-        const text = await googleRes.text();
-        
-        try {
-            const result = JSON.parse(text);
-            if (result.status === "success") {
-                res.json({ success: true });
-            } else {
-                res.status(500).json({ error: result.message || "Error en Google Script" });
-            }
-        } catch (parseError) {
-            console.error("❌ Error parseando respuesta de Google:", text);
-            res.status(500).json({ error: "Respuesta inválida del servidor de correos." });
-        }
+      const text = await googleRes.text();
+console.log("Respuesta bruta de Google:", text); // Esto te dirá qué está fallando realmente
 
-    } catch (e) {
-        console.error("❌ Error en registro:", e.message);
-        res.status(500).json({ error: e.message });
+try {
+    // Si Google manda basura antes del JSON, esto lo limpia
+    const jsonStart = text.indexOf('{');
+    const jsonEnd = text.lastIndexOf('}') + 1;
+    const cleanJson = text.substring(jsonStart, jsonEnd);
+    
+    const result = JSON.parse(cleanJson);
+    if (result.status === "success" || result.status === "valid") {
+        res.json({ success: true });
+    } else {
+        res.status(500).json({ error: result.message || "Código de Google no exitoso" });
     }
-});
+} catch (parseError) {
+    res.status(500).json({ error: "Google no devolvió un JSON válido. Revisá los logs de Render." });
+}
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
