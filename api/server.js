@@ -205,8 +205,8 @@ app.post("/webhook", async (req, res) => {
 // --- LÓGICA DE REGISTRO ---
 app.post("/api/request-verification", async (req, res) => {
     try {
-        const { email, usuario, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
-        if (!email || !usuario || !password) return res.status(400).json({ error: "Faltan datos." });
+        const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
+        if (!email || !business || !password) return res.status(400).json({ error: "Faltan datos." });
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -231,7 +231,7 @@ app.post("/api/request-verification", async (req, res) => {
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, usuario, business_name, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        const { email, code, business, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
         
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -242,7 +242,7 @@ app.post("/api/verify-and-register", async (req, res) => {
 
         if (result.status === "valid") {
             // Priorizamos business_name, si no viene, usamos usuario
-            const finalName = business_name || usuario || result.usuario;
+            const finalName = business || usuario || result.usuario;
             const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
             
             // Lógica de Plan y Tokens
