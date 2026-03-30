@@ -370,6 +370,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         const finalData = {
             stats: {
+                nombre_persona: user.nombre_persona,
                 turnosHoy, turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
