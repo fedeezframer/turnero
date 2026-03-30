@@ -297,6 +297,28 @@ app.post("/update-settings", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get("/verify-session", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.query.u);
+        if (!slug) return res.json({ active: false });
+
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('slug')
+            .eq('slug', slug)
+            .single();
+
+        if (user && !error) {
+            res.json({ active: true });
+        } else {
+            res.json({ active: false });
+        }
+    } catch (e) {
+        console.error("Error verify-session:", e.message);
+        res.json({ active: false });
+    }
+});
+
 // --- GESTIÓN DE TURNOS ---
 app.get("/get-occupied", async (req, res) => {
     try {
