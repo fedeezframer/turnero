@@ -13,8 +13,8 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwCIzLEl6SP_nGO
 
 app.use(cors({
     origin: '*',
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type']
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
