@@ -9,7 +9,6 @@ const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-// URL de tu Web App de Google Apps Script
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwCIzLEl6SP_nGOudLAzJx3KxdSZdHHPwoO8b8KRjBVrb6gEeT8dXuV60yHWT-8TYzh/exec"; 
 
 app.use(cors({
@@ -23,7 +22,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 
 // --- CACHÉ SISTEMA ---
 const globalCache = {}; 
-const CACHE_DURATION = 20000; // 20 segundos
+const CACHE_DURATION = 20000; 
 
 // --- UTILIDADES ---
 const getCleanSlug = (rawSlug) => {
@@ -146,7 +145,7 @@ app.get("/oauth-callback", async (req, res) => {
     }
 });
 
-// --- WEBHOOK UNIFICADO (TURNOS Y SUSCRIPCIONES) ---
+// --- WEBHOOK UNIFICADO ---
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
@@ -203,36 +202,33 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 });
 
-// --- LÓGICA DE REGISTRO VÍA GOOGLE APPS SCRIPT ---
+// --- LÓGICA DE REGISTRO ACTUALIZADA ---
 
-// --- PASO 1: PEDIR VERIFICACIÓN (Se activa desde el botón de planes en Framer) ---
 app.post("/api/request-verification", async (req, res) => {
     try {
-        console.log("Cuerpo recibido en backend:", req.body); // LOG CLAVE
-        const { email, usuario, password, plan } = req.body;
+        const { email, usuario, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
 
         if (!email || !usuario || !password) {
-            return res.status(400).json({ 
-                error: "Faltan datos obligatorios.",
-                recibido: { email: !!email, usuario: !!usuario, password: !!password } 
-            });
+            return res.status(400).json({ error: "Faltan datos obligatorios." });
         }
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
-            // Cambiamos a text/plain para evitar problemas de CORS pre-flight con Google
             headers: { "Content-Type": "text/plain" }, 
             body: JSON.stringify({ 
                 action: "sendCode", 
                 email: email.trim().toLowerCase(),
                 usuario,
                 password,
-                plan: plan || "gratis" 
+                plan: plan || "gratis",
+                precio: precio || 0,
+                duracion_turno: duracion_turno || 30,
+                tokens: tokens || 50,
+                horarios: JSON.stringify(horarios)
             })
         });
 
-        const text = await googleRes.text(); // Primero leemos como texto por si Google tira error HTML
-        console.log("Respuesta bruta de Google:", text);
+        const text = await googleRes.text();
         const result = JSON.parse(text);
 
         if (result.status === "success") {
@@ -241,70 +237,56 @@ app.post("/api/request-verification", async (req, res) => {
             res.status(500).json({ error: result.message });
         }
     } catch (e) {
-        console.error("Error completo:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- PASO 2: VERIFICAR Y REGISTRAR (Se activa en la pantalla de verificación) ---
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business_name, phone, precio, duracion_turno, plan, ...horariosExtra } = req.body;
+        const { email, code, business_name, precio, duracion_turno, plan, tokens, horarios } = req.body;
 
-        if (!email || !code) return res.status(400).json({ error: "Faltan datos clave (email o código)." });
+        if (!email || !code) return res.status(400).json({ error: "Faltan datos clave." });
 
-        // 1. Validamos el código con Google Scripts
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
         });
+        
         const result = await googleRes.json();
 
         if (result.status === "valid") {
             const { usuario, password } = result;
+            const finalBusinessName = business_name || usuario;
+            
+            const cleanSlug = finalBusinessName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
-            // 2. Generamos el Slug
-            const cleanSlug = (business_name || usuario).toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-            // 3. ARMAMOS EL OBJETO DE HORARIOS (Soportando ambos formatos)
-            const objetoHorarios = req.body.horarios || {
-                lunes: { activo: !!req.body.lunes_inicio, jornada: [req.body.lunes_inicio || "09:00", req.body.lunes_fin || "18:00"], descanso: [req.body.lunes_desc_ini || "13:00", req.body.lunes_desc_fin || "14:00"] },
-                martes: { activo: !!req.body.martes_inicio, jornada: [req.body.martes_inicio || "09:00", req.body.martes_fin || "18:00"], descanso: [req.body.martes_desc_ini || "13:00", req.body.martes_desc_fin || "14:00"] },
-                miercoles: { activo: !!req.body.miercoles_inicio, jornada: [req.body.miercoles_inicio || "09:00", req.body.miercoles_fin || "18:00"], descanso: [req.body.miercoles_desc_ini || "13:00", req.body.miercoles_desc_fin || "14:00"] },
-                jueves: { activo: !!req.body.jueves_inicio, jornada: [req.body.jueves_inicio || "09:00", req.body.jueves_fin || "18:00"], descanso: [req.body.jueves_desc_ini || "13:00", req.body.jueves_desc_fin || "14:00"] },
-                viernes: { activo: !!req.body.viernes_inicio, jornada: [req.body.viernes_inicio || "09:00", req.body.viernes_fin || "18:00"], descanso: [req.body.viernes_desc_ini || "13:00", req.body.viernes_desc_fin || "14:00"] },
-                sabado: { activo: !!req.body.sabado_inicio, jornada: [req.body.sabado_inicio || "09:00", req.body.sabado_fin || "13:00"], descanso: [req.body.sabado_desc_ini || null, req.body.sabado_desc_fin || null] },
-                domingo: { activo: !!req.body.domingo_inicio, jornada: [req.body.domingo_inicio || null, req.body.domingo_fin || null], descanso: [null, null] }
-            };
-
-            // 4. Insertamos en Supabase
             const { error: insertError } = await supabase.from('usuarios').insert([{ 
                 slug: cleanSlug, 
                 email: email.trim().toLowerCase(), 
-                business_name: business_name || usuario, 
+                business_name: finalBusinessName, 
                 password: String(password), 
                 sheet_id: MASTER_SHEET_ID, 
                 precio: parseInt(precio) || 0, 
                 duracion_turno: parseInt(duracion_turno) || 30,
-                horarios: objetoHorarios,
+                horarios: horarios || {}, 
                 plan: plan || 'gratis',
+                tokens: parseInt(tokens) || 50,
                 mp_access_token: null
             }]);
 
-            if (insertError) return res.status(500).json({ error: "Error en base de datos: " + insertError.message });
+            if (insertError) return res.status(500).json({ error: "Error Supabase: " + insertError.message });
 
             res.json({ success: true, slug: cleanSlug });
         } else {
-            res.status(400).json({ error: "Código incorrecto o expirado." });
+            res.status(400).json({ error: "Código incorrecto." });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-
-// --- MÉTODOS DE ADMIN Y TURNOS ---
+// --- RESTO DE MÉTODOS (ADMIN, LOGIN, STATS) ---
 
 app.get("/verify-session", async (req, res) => {
     try {
@@ -464,4 +446,4 @@ app.post("/cancel-appointment", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor NegoSocio corriendo en puerto ${PORT}`));
