@@ -3,13 +3,13 @@ import cors from "cors";
 import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
-import fetch from "node-fetch"; 
+import fetch from "node-fetch";
 
 const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
-const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwu5RkuCAZQTPcnBKUjvRF8oA209kNhJsGDxj-7gzV23R-bNabgmMzrQAc_PIM4KTG7/exec"; 
+const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwu5RkuCAZQTPcnBKUjvRF8oA209kNhJsGDxj-7gzV23R-bNabgmMzrQAc_PIM4KTG7/exec";
 
 app.use(cors({
     origin: '*',
@@ -21,8 +21,8 @@ app.use(express.json());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // --- CACHÉ SISTEMA ---
-const globalCache = {}; 
-const CACHE_DURATION = 20000; 
+const globalCache = {};
+const CACHE_DURATION = 20000;
 
 // --- UTILIDADES ---
 const getCleanSlug = (rawSlug) => {
@@ -50,10 +50,9 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// --- FUNCIÓN DE DESCUENTO INTELIGENTE ---
+// --- LÓGICA DE TOKENS ---
 async function handleTokenDiscount(slug) {
     try {
-        // 1. Buscamos al usuario para ver su plan
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('plan, tokens')
@@ -62,10 +61,10 @@ async function handleTokenDiscount(slug) {
 
         if (userError || !user) return;
 
-        // 2. Si es PREMIUM, no descontamos nada (tokens infinitos)
+        // Si es premium, no descontamos (tiene 100k tokens de base)
         if (user.plan === 'premium') return;
 
-        // 3. Si es GRATIS, restamos 1 token del saldo en Supabase
+        // Si es gratis, bajamos 1
         if (user.tokens > 0) {
             await supabase
                 .from('usuarios')
@@ -77,53 +76,12 @@ async function handleTokenDiscount(slug) {
     }
 }
 
-// --- MODIFICACIÓN EN WEBHOOK (PAGOS) ---
-// Buscá la parte donde hacés el append al sheet y agregá la llamada al final:
-if (paymentData.status === "approved") {
-    // ... (tu código de append al sheet) ...
-    await sheets.spreadsheets.values.append({ ... });
-
-    // DESCUENTO DESPUÉS DE ANOTAR
-    await handleTokenDiscount(slug); 
-
-    delete globalCache[slug];
-}
-
-// --- MODIFICACIÓN EN CREATE-BOOKING (GRATIS) ---
-app.post("/create-booking", async (req, res) => {
-    try {
-        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
-        const slug = getCleanSlug(rawSlug);
-
-        // Bloqueo preventivo: si es gratis y no tiene tokens, ni siquiera miramos el sheet
-        const { data: user } = await supabase.from('usuarios').select('plan, tokens').eq('slug', slug).single();
-        if (user.plan === 'gratis' && user.tokens <= 0) {
-            return res.status(403).json({ success: false, error: "Sin créditos disponibles." });
-        }
-
-        const sheets = await getSheets();
-        // ... (tu lógica de validación de duplicados) ...
-
-        // 1. Anotamos en el Sheet
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
-            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
-        });
-
-        // 2. Descontamos el token solo si corresponde
-        await handleTokenDiscount(slug);
-
-        delete globalCache[slug];
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- RUTA RAÍZ ---
+// --- RUTAS DE SISTEMA ---
 app.get("/", (req, res) => {
     res.send("🚀 NegoSocio API Server Is Online (Full Mode)");
 });
 
-// --- 0. MERCADO PAGO: CREAR PREFERENCIA DINÁMICA ---
+// --- MERCADO PAGO: PREFERENCIA ---
 app.post("/api/create-preference", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
@@ -135,15 +93,10 @@ app.post("/api/create-preference", async (req, res) => {
             .eq('slug', cleanSlug)
             .single();
 
-        if (userError || !user) {
-            return res.status(404).json({ error: "Negocio no encontrado." });
-        }
+        if (userError || !user) return res.status(404).json({ error: "Negocio no encontrado." });
 
         const precioReal = Number(user.precio) || 0;
-
-        if (precioReal === 0) {
-            return res.json({ isFree: true });
-        }
+        if (precioReal === 0) return res.json({ isFree: true });
 
         if (!user.mp_access_token) {
             return res.status(400).json({ error: "Este negocio requiere pago pero no configuró Mercado Pago." });
@@ -173,13 +126,10 @@ app.post("/api/create-preference", async (req, res) => {
     }
 });
 
-// --- 0.1 MERCADO PAGO: OAUTH CALLBACK ---
+// --- MERCADO PAGO: OAUTH ---
 app.get("/oauth-callback", async (req, res) => {
-    const { code, state: slug } = req.query; 
-
-    if (!code || !slug) {
-        return res.status(400).send("No se pudo identificar al usuario o el código es inválido.");
-    }
+    const { code, state: slug } = req.query;
+    if (!code || !slug) return res.status(400).send("Datos inválidos.");
 
     try {
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
@@ -195,31 +145,23 @@ app.get("/oauth-callback", async (req, res) => {
         });
 
         const data = await response.json();
-
         if (data.access_token) {
-            const { error } = await supabase
-                .from('usuarios')
-                .update({ mp_access_token: data.access_token }) 
-                .eq('slug', slug);
-
-            if (error) throw error;
-
+            await supabase.from('usuarios').update({ mp_access_token: data.access_token }).eq('slug', slug);
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
         } else {
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
-        res.status(500).send("Error vinculando la cuenta.");
+        res.status(500).send("Error vinculando cuenta.");
     }
 });
 
-// --- WEBHOOK UNIFICADO ---
+// --- WEBHOOK UNIFICADO (PAGOS Y SUSCRIPCIONES) ---
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data.id;
-
         try {
             const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
@@ -229,8 +171,7 @@ app.post("/webhook", async (req, res) => {
             if (paymentData.status === "approved") {
                 const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
                 const partes = fecha.split("-");
-                const diaMesFormulario = `${partes[2]}/${partes[1]}`;
-                const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
+                const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                 const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                 const sheets = await getSheets();
@@ -238,153 +179,28 @@ app.post("/webhook", async (req, res) => {
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
                     valueInputOption: "RAW",
-                    requestBody: {
-                        values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]]
-                    }
+                    requestBody: { values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
                 });
 
-                delete globalCache[slug]; 
+                await handleTokenDiscount(slug);
+                delete globalCache[slug];
             }
-        } catch (e) {
-            console.error("Error en Webhook:", e.message);
-        }
+        } catch (e) { console.error("Error Webhook Payment:", e.message); }
     }
 
     if (body.type === "subscription_preapproval") {
-        const subscriptionId = body.data.id;
         try {
-            const response = await fetch(`https://api.mercadopago.com/preapproval/${subscriptionId}`, {
+            const subId = body.data.id;
+            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
             const subData = await response.json();
-
             if (subData.status === "authorized") {
-                const payerEmail = subData.payer_email;
-                await supabase.from('usuarios').update({ plan: 'premium' }).eq('email', payerEmail);
+                await supabase.from('usuarios').update({ plan: 'premium', tokens: 100000 }).eq('email', subData.payer_email);
             }
-        } catch (e) {
-            console.error("Error en Webhook Premium:", e.message);
-        }
+        } catch (e) { console.error("Error Webhook Premium:", e.message); }
     }
-
     res.sendStatus(200);
-});
-
-// --- LÓGICA DE REGISTRO ---
-app.post("/api/request-verification", async (req, res) => {
-    try {
-        const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
-        
-        // Validación corregida: usamos 'business'
-        if (!email || !business || !password) return res.status(400).json({ error: "Faltan datos." });
-
-        const googleRes = await fetch(APPS_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" }, 
-            body: JSON.stringify({ 
-                action: "sendCode", 
-                email: email.trim().toLowerCase(),
-                usuario: business, // Mapeamos 'business' al campo 'usuario' que espera Google
-                password, plan, precio, duracion_turno, tokens,
-                horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
-            })
-        });
-
-        const text = await googleRes.text();
-        const jsonStart = text.indexOf('{');
-        const jsonEnd = text.lastIndexOf('}') + 1;
-        const result = JSON.parse(text.substring(jsonStart, jsonEnd));
-        
-        if (result.status === "success") res.json({ success: true });
-        else res.status(500).json({ error: result.message || "Error en Google Script" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post("/api/verify-and-register", async (req, res) => {
-    try {
-        // CORRECCIÓN: Quitamos el 'business' duplicado que rompía el deploy
-        const { email, code, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
-        
-        const googleRes = await fetch(APPS_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
-        });
-        const result = await googleRes.json();
-
-        if (result.status === "valid") {
-            // Prioridad: 1. Lo que viene de Framer (business) | 2. Lo que guardó Google (result.usuario)
-            const finalName = business || result.usuario || "Negocio";
-            const cleanSlug = finalName.toLowerCase().trim()
-                .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-                .replace(/\s+/g, '-')
-                .replace(/[^a-z0-9-]/g, '');
-            
-            const isPremium = plan === 'premium';
-            const finalPlan = isPremium ? 'premium' : 'gratis';
-            const finalTokens = isPremium ? 100000 : 50;
-
-            const { error } = await supabase.from('usuarios').insert([{ 
-                slug: cleanSlug, 
-                email: email.trim().toLowerCase(), 
-                business_name: finalName, 
-                password: String(result.password), 
-                sheet_id: MASTER_SHEET_ID, 
-                precio: parseInt(precio) || 0, 
-                duracion_turno: parseInt(duracion_turno) || 30,
-                horarios: horarios || {}, 
-                plan: finalPlan, 
-                tokens: finalTokens,
-                telefono: telefono || null 
-            }]);
-            
-            if (error) throw error;
-            res.json({ success: true, slug: cleanSlug });
-        } else { 
-            res.status(400).json({ error: "Código incorrecto" }); 
-        }
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post("/update-settings", async (req, res) => {
-    try {
-        const { slug, business_name, precio, duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin } = req.body;
-        const cleanSlug = getCleanSlug(slug);
-        const { error } = await supabase.from('usuarios').update({ 
-            business_name, 
-            precio: parseInt(precio), 
-            duracion_turno: parseInt(duracion_turno),
-            hora_inicio_jornada: h_ini_j, 
-            hora_fin_jornada: h_fin_j, 
-            descanso_inicio: d_ini, 
-            descanso_fin: d_fin
-        }).eq('slug', cleanSlug);
-
-        if (error) throw error;
-        delete globalCache[cleanSlug];
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get("/verify-session", async (req, res) => {
-    try {
-        const slug = getCleanSlug(req.query.u);
-        if (!slug) return res.json({ active: false });
-
-        const { data: user, error } = await supabase
-            .from('usuarios')
-            .select('slug')
-            .eq('slug', slug)
-            .single();
-
-        if (user && !error) {
-            res.json({ active: true });
-        } else {
-            res.json({ active: false });
-        }
-    } catch (e) {
-        console.error("Error verify-session:", e.message);
-        res.json({ active: false });
-    }
 });
 
 // --- GESTIÓN DE TURNOS ---
@@ -394,8 +210,104 @@ app.get("/get-occupied", async (req, res) => {
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
-        const ocupados = rows.filter(row => row[4] === slug).map(row => row[2]); 
+        const ocupados = rows.filter(row => row[4] === slug).map(row => row[2]);
         res.json({ success: true, ocupados });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/create-booking", async (req, res) => {
+    try {
+        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
+        const slug = getCleanSlug(rawSlug);
+
+        // Validar tokens
+        const { data: user } = await supabase.from('usuarios').select('plan, tokens').eq('slug', slug).single();
+        if (user && user.plan === 'gratis' && user.tokens <= 0) {
+            return res.status(403).json({ success: false, error: "Sin tokens disponibles." });
+        }
+
+        const sheets = await getSheets();
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
+        const rows = response.data.values || [];
+
+        if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
+            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado." });
+        }
+
+        const partes = fecha.split("-");
+        const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
+        const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
+            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
+        });
+
+        await handleTokenDiscount(slug);
+        delete globalCache[slug];
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- REGISTRO Y AUTH ---
+app.post("/api/request-verification", async (req, res) => {
+    try {
+        const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
+        if (!email || !business || !password) return res.status(400).json({ error: "Faltan datos." });
+
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({
+                action: "sendCode",
+                email: email.trim().toLowerCase(),
+                usuario: business,
+                password, plan, precio, duracion_turno, tokens,
+                horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
+            })
+        });
+
+        const text = await googleRes.text();
+        const result = JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1));
+        if (result.status === "success") res.json({ success: true });
+        else res.status(500).json({ error: result.message });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/verify-and-register", async (req, res) => {
+    try {
+        const { email, code, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
+        });
+        const result = await googleRes.json();
+
+        if (result.status === "valid") {
+            const finalName = business || result.usuario || "Negocio";
+            const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            const isPremium = plan === 'premium';
+            
+            const { error } = await supabase.from('usuarios').insert([{
+                slug: cleanSlug,
+                email: email.trim().toLowerCase(),
+                business_name: finalName,
+                password: String(result.password),
+                sheet_id: MASTER_SHEET_ID,
+                precio: parseInt(precio) || 0,
+                duracion_turno: parseInt(duracion_turno) || 30,
+                horarios: horarios || {},
+                plan: isPremium ? 'premium' : 'gratis',
+                tokens: isPremium ? 100000 : 50,
+                telefono: telefono || null
+            }]);
+
+            if (error) throw error;
+            res.json({ success: true, slug: cleanSlug });
+        } else {
+            res.status(400).json({ error: "Código incorrecto" });
+        }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -409,7 +321,7 @@ app.post("/login", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ADMIN STATS COMPLETO ---
+// --- ADMIN Y CONFIG ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -425,17 +337,14 @@ app.get("/admin-stats/:slug", async (req, res) => {
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
-        const añoActual = ahoraArg.getFullYear();
-
+        
         let turnosHoy = 0, turnosMesActual = 0, turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
-            const partes = r[2].toString().trim().split(" - ");
-            if (partes.length < 2) return;
+            const partes = r[2].toString().split(" - ");
             const [dia, mes] = partes[0].split("/").map(Number);
-
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
@@ -444,13 +353,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
-            turnosLista.push({ 
-                nombre: r[0], 
-                telefono: r[1], 
-                fecha: `${añoActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
-                hora: partes[1], 
-                rawTurno: r[2] 
-            });
+            turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
         });
 
         const finalData = {
@@ -460,13 +363,23 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name || user.slug,
-                config: { duracion: user.duracion_turno, h_ini_j: user.hora_inicio_jornada, h_fin_j: user.hora_fin_jornada, d_ini: user.descanso_inicio, d_fin: user.descanso_fin, precio: user.precio, mp_status: user.mp_access_token ? "Conectado" : "Desconectado", plan: user.plan || 'gratis' },
+                tokens: user.tokens,
+                config: { duracion: user.duracion_turno, h_ini_j: user.hora_inicio_jornada, h_fin_j: user.hora_fin_jornada, d_ini: user.descanso_inicio, d_fin: user.descanso_fin, precio: user.precio, mp_status: user.mp_access_token ? "Conectado" : "Desconectado", plan: user.plan },
                 turnosLista: turnosLista.reverse()
             }
         };
-
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/update-settings", async (req, res) => {
+    try {
+        const { slug, business_name, precio, duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+        await supabase.from('usuarios').update({ business_name, precio: parseInt(precio), duracion_turno: parseInt(duracion_turno), hora_inicio_jornada: h_ini_j, hora_fin_jornada: h_fin_j, descanso_inicio: d_ini, descanso_fin: d_fin }).eq('slug', cleanSlug);
+        delete globalCache[cleanSlug];
+        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -478,12 +391,10 @@ app.post("/cancel-appointment", async (req, res) => {
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
         const rowIndex = rows.findIndex(r => r[2] === rawTurno && r[4] === cleanSlug);
-
-        if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
-
+        if (rowIndex === -1) return res.status(404).json({ error: "No encontrado" });
+        
         const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: MASTER_SHEET_ID });
         const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
-
         await sheets.spreadsheets.batchUpdate({
             spreadsheetId: MASTER_SHEET_ID,
             requestBody: { requests: [{ deleteDimension: { range: { sheetId: sheetIdReal, dimension: "ROWS", startIndex: rowIndex, endIndex: rowIndex + 1 } } }] }
@@ -493,5 +404,13 @@ app.post("/cancel-appointment", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get("/verify-session", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.query.u);
+        const { data: user } = await supabase.from('usuarios').select('slug').eq('slug', slug).single();
+        res.json({ active: !!user });
+    } catch (e) { res.json({ active: false }); }
+});
+
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor NegoSocio corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor NegoSocio en puerto ${PORT}`));
