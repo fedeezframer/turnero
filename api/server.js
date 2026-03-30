@@ -50,6 +50,74 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
+// --- FUNCIÓN DE DESCUENTO INTELIGENTE ---
+async function handleTokenDiscount(slug) {
+    try {
+        // 1. Buscamos al usuario para ver su plan
+        const { data: user, error: userError } = await supabase
+            .from('usuarios')
+            .select('plan, tokens')
+            .eq('slug', slug)
+            .single();
+
+        if (userError || !user) return;
+
+        // 2. Si es PREMIUM, no descontamos nada (tokens infinitos)
+        if (user.plan === 'premium') return;
+
+        // 3. Si es GRATIS, restamos 1 token del saldo en Supabase
+        if (user.tokens > 0) {
+            await supabase
+                .from('usuarios')
+                .update({ tokens: user.tokens - 1 })
+                .eq('slug', slug);
+        }
+    } catch (e) {
+        console.error("Error al descontar token:", e.message);
+    }
+}
+
+// --- MODIFICACIÓN EN WEBHOOK (PAGOS) ---
+// Buscá la parte donde hacés el append al sheet y agregá la llamada al final:
+if (paymentData.status === "approved") {
+    // ... (tu código de append al sheet) ...
+    await sheets.spreadsheets.values.append({ ... });
+
+    // DESCUENTO DESPUÉS DE ANOTAR
+    await handleTokenDiscount(slug); 
+
+    delete globalCache[slug];
+}
+
+// --- MODIFICACIÓN EN CREATE-BOOKING (GRATIS) ---
+app.post("/create-booking", async (req, res) => {
+    try {
+        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
+        const slug = getCleanSlug(rawSlug);
+
+        // Bloqueo preventivo: si es gratis y no tiene tokens, ni siquiera miramos el sheet
+        const { data: user } = await supabase.from('usuarios').select('plan, tokens').eq('slug', slug).single();
+        if (user.plan === 'gratis' && user.tokens <= 0) {
+            return res.status(403).json({ success: false, error: "Sin créditos disponibles." });
+        }
+
+        const sheets = await getSheets();
+        // ... (tu lógica de validación de duplicados) ...
+
+        // 1. Anotamos en el Sheet
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
+            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
+        });
+
+        // 2. Descontamos el token solo si corresponde
+        await handleTokenDiscount(slug);
+
+        delete globalCache[slug];
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // --- RUTA RAÍZ ---
 app.get("/", (req, res) => {
     res.send("🚀 NegoSocio API Server Is Online (Full Mode)");
@@ -328,33 +396,6 @@ app.get("/get-occupied", async (req, res) => {
         const rows = response.data.values || [];
         const ocupados = rows.filter(row => row[4] === slug).map(row => row[2]); 
         res.json({ success: true, ocupados });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post("/create-booking", async (req, res) => {
-    try {
-        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
-        const slug = getCleanSlug(rawSlug);
-        const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
-        const rows = response.data.values || [];
-
-        if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
-            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado." });
-        }
-
-        const partes = fecha.split("-");
-        const diaMesFormulario = `${partes[2]}/${partes[1]}`;
-        const textoTurnoNuevo = `${diaMesFormulario} - ${hora}`;
-        const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
-            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
-        });
-
-        delete globalCache[slug];
-        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
