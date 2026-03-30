@@ -206,6 +206,8 @@ app.post("/webhook", async (req, res) => {
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
+        
+        // Validación corregida: usamos 'business'
         if (!email || !business || !password) return res.status(400).json({ error: "Faltan datos." });
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
@@ -214,7 +216,8 @@ app.post("/api/request-verification", async (req, res) => {
             body: JSON.stringify({ 
                 action: "sendCode", 
                 email: email.trim().toLowerCase(),
-                usuario, password, plan, precio, duracion_turno, tokens,
+                usuario: business, // Mapeamos 'business' al campo 'usuario' que espera Google
+                password, plan, precio, duracion_turno, tokens,
                 horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
             })
         });
@@ -228,7 +231,6 @@ app.post("/api/request-verification", async (req, res) => {
         else res.status(500).json({ error: result.message || "Error en Google Script" });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { email, code, business, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
