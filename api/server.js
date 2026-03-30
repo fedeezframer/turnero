@@ -202,8 +202,7 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 });
 
-// --- LÓGICA DE REGISTRO ACTUALIZADA ---
-
+// --- LÓGICA DE REGISTRO ---
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { email, usuario, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
@@ -211,8 +210,6 @@ app.post("/api/request-verification", async (req, res) => {
         if (!email || !usuario || !password) {
             return res.status(400).json({ error: "Faltan datos obligatorios." });
         }
-
-        console.log("📨 Enviando a Apps Script:", email);
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -230,24 +227,20 @@ app.post("/api/request-verification", async (req, res) => {
             })
         });
 
-      const text = await googleRes.text();
-console.log("Respuesta bruta de Google:", text); // Esto te dirá qué está fallando realmente
+        const text = await googleRes.text();
+        const jsonStart = text.indexOf('{');
+        const jsonEnd = text.lastIndexOf('}') + 1;
+        const result = JSON.parse(text.substring(jsonStart, jsonEnd));
 
-try {
-    // Si Google manda basura antes del JSON, esto lo limpia
-    const jsonStart = text.indexOf('{');
-    const jsonEnd = text.lastIndexOf('}') + 1;
-    const cleanJson = text.substring(jsonStart, jsonEnd);
-    
-    const result = JSON.parse(cleanJson);
-    if (result.status === "success" || result.status === "valid") {
-        res.json({ success: true });
-    } else {
-        res.status(500).json({ error: result.message || "Código de Google no exitoso" });
+        if (result.status === "success" || result.status === "valid") {
+            res.json({ success: true });
+        } else {
+            res.status(500).json({ error: result.message || "Código de Google no exitoso" });
+        }
+    } catch (parseError) {
+        res.status(500).json({ error: "Error de comunicación con el servicio de verificación." });
     }
-} catch (parseError) {
-    res.status(500).json({ error: "Google no devolvió un JSON válido. Revisá los logs de Render." });
-}
+});
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
@@ -294,8 +287,7 @@ app.post("/api/verify-and-register", async (req, res) => {
     }
 });
 
-// --- RESTO DE MÉTODOS (ADMIN, LOGIN, STATS) ---
-
+// --- SESIÓN Y CONFIGURACIÓN ---
 app.get("/verify-session", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.u);
@@ -324,6 +316,7 @@ app.post("/update-settings", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- GESTIÓN DE TURNOS ---
 app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
@@ -372,6 +365,7 @@ app.post("/login", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- ADMIN STATS COMPLETO ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -440,6 +434,8 @@ app.post("/cancel-appointment", async (req, res) => {
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
         const rowIndex = rows.findIndex(r => r[2] === rawTurno && r[4] === cleanSlug);
+
+        if (rowIndex === -1) return res.status(404).json({ error: "Turno no encontrado" });
 
         const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: MASTER_SHEET_ID });
         const sheetIdReal = spreadsheet.data.sheets[0].properties.sheetId;
