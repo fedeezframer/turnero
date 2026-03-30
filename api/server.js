@@ -276,22 +276,34 @@ app.post("/api/request-verification", async (req, res) => {
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        const { email, code, business_name, nombre_persona, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
+            body: JSON.stringify({ 
+                action: "verifyCode", 
+                email: email.trim().toLowerCase(), 
+                code: code.toString().trim() 
+            })
         });
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            const finalName = business || result.usuario || "Negocio";
-            const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            const finalName = business_name || result.usuario || "Negocio";
+            
+            // Generar slug limpio
+            const cleanSlug = finalName.toLowerCase().trim()
+                .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            
             const isPremium = plan === 'premium';
             
+            // INSERT EN SUPABASE
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
+                nombre_persona: nombre_persona, // <--- GUARDADO EN DB
                 business_name: finalName,
                 password: String(result.password),
                 sheet_id: MASTER_SHEET_ID,
