@@ -212,6 +212,8 @@ app.post("/api/request-verification", async (req, res) => {
             return res.status(400).json({ error: "Faltan datos obligatorios." });
         }
 
+        console.log("📨 Enviando a Apps Script:", email);
+
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" }, 
@@ -224,19 +226,26 @@ app.post("/api/request-verification", async (req, res) => {
                 precio: precio || 0,
                 duracion_turno: duracion_turno || 30,
                 tokens: tokens || 50,
-                horarios: JSON.stringify(horarios)
+                horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
             })
         });
 
         const text = await googleRes.text();
-        const result = JSON.parse(text);
-
-        if (result.status === "success") {
-            res.json({ success: true });
-        } else {
-            res.status(500).json({ error: result.message });
+        
+        try {
+            const result = JSON.parse(text);
+            if (result.status === "success") {
+                res.json({ success: true });
+            } else {
+                res.status(500).json({ error: result.message || "Error en Google Script" });
+            }
+        } catch (parseError) {
+            console.error("❌ Error parseando respuesta de Google:", text);
+            res.status(500).json({ error: "Respuesta inválida del servidor de correos." });
         }
+
     } catch (e) {
+        console.error("❌ Error en registro:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
