@@ -233,7 +233,8 @@ app.post("/api/request-verification", async (req, res) => {
 });
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        // CORRECCIÓN: Quitamos el 'business' duplicado que rompía el deploy
+        const { email, code, business, precio, duracion_turno, plan, horarios, telefono } = req.body;
         
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -243,11 +244,13 @@ app.post("/api/verify-and-register", async (req, res) => {
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            // Priorizamos business_name, si no viene, usamos usuario
-            const finalName = business || usuario || result.usuario;
-            const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            // Prioridad: 1. Lo que viene de Framer (business) | 2. Lo que guardó Google (result.usuario)
+            const finalName = business || result.usuario || "Negocio";
+            const cleanSlug = finalName.toLowerCase().trim()
+                .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-')
+                .replace(/[^a-z0-9-]/g, '');
             
-            // Lógica de Plan y Tokens
             const isPremium = plan === 'premium';
             const finalPlan = isPremium ? 'premium' : 'gratis';
             const finalTokens = isPremium ? 100000 : 50;
@@ -263,7 +266,7 @@ app.post("/api/verify-and-register", async (req, res) => {
                 horarios: horarios || {}, 
                 plan: finalPlan, 
                 tokens: finalTokens,
-                telefono: telefono || null // Ahora si llegará el dato
+                telefono: telefono || null 
             }]);
             
             if (error) throw error;
@@ -271,9 +274,7 @@ app.post("/api/verify-and-register", async (req, res) => {
         } else { 
             res.status(400).json({ error: "Código incorrecto" }); 
         }
-    } catch (e) { 
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/update-settings", async (req, res) => {
