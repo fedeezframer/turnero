@@ -207,13 +207,23 @@ app.post("/webhook", async (req, res) => {
 
 app.post("/api/request-verification", async (req, res) => {
     try {
-        const { usuario, email, password } = req.body;
+        // Recibimos TODO lo que viene de Framer
+        const { usuario, email, password, precio, duracion_turno, plan } = req.body;
         if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
-            headers: { "Content-Type": "text/plain" }, // Google Script prefiere esto a veces
-            body: JSON.stringify({ action: "createAttempt", usuario, email: email.trim().toLowerCase(), password })
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({ 
+                action: "createAttempt", 
+                usuario, 
+                email: email.trim().toLowerCase(), 
+                password,
+                // Pasamos estos datos extra para que el Script los guarde temporalmente
+                precio: precio || 0,
+                duracion_turno: duracion_turno || 30,
+                plan: plan || "gratis"
+            })
         });
         const result = await googleRes.json();
         
