@@ -9,7 +9,7 @@ const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg"; 
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwCIzLEl6SP_nGOudLAzJx3KxdSZdHHPwoO8b8KRjBVrb6gEeT8dXuV60yHWT-8TYzh/exec"; 
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwu5RkuCAZQTPcnBKUjvRF8oA209kNhJsGDxj-7gzV23R-bNabgmMzrQAc_PIM4KTG7/exec"; 
 
 app.use(cors({
     origin: '*',
