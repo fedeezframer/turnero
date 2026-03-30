@@ -206,10 +206,7 @@ app.post("/webhook", async (req, res) => {
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { email, usuario, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
-
-        if (!email || !usuario || !password) {
-            return res.status(400).json({ error: "Faltan datos obligatorios." });
-        }
+        if (!email || !usuario || !password) return res.status(400).json({ error: "Faltan datos." });
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -217,12 +214,7 @@ app.post("/api/request-verification", async (req, res) => {
             body: JSON.stringify({ 
                 action: "sendCode", 
                 email: email.trim().toLowerCase(),
-                usuario,
-                password,
-                plan: plan || "gratis",
-                precio: precio || 0,
-                duracion_turno: duracion_turno || 30,
-                tokens: tokens || 50,
+                usuario, password, plan, precio, duracion_turno, tokens,
                 horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
             })
         });
@@ -231,60 +223,49 @@ app.post("/api/request-verification", async (req, res) => {
         const jsonStart = text.indexOf('{');
         const jsonEnd = text.lastIndexOf('}') + 1;
         const result = JSON.parse(text.substring(jsonStart, jsonEnd));
-
-        if (result.status === "success" || result.status === "valid") {
-            res.json({ success: true });
-        } else {
-            res.status(500).json({ error: result.message || "Código de Google no exitoso" });
-        }
-    } catch (parseError) {
-        res.status(500).json({ error: "Error de comunicación con el servicio de verificación." });
-    }
+        
+        if (result.status === "success") res.json({ success: true });
+        else res.status(500).json({ error: result.message || "Error en Google Script" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business_name, precio, duracion_turno, plan, tokens, horarios } = req.body;
-
-        if (!email || !code) return res.status(400).json({ error: "Faltan datos clave." });
-
+        const { email, code, business_name, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
         });
-        
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            const { usuario, password } = result;
-            const finalBusinessName = business_name || usuario;
+            const finalName = business_name || result.usuario;
+            const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
             
-            const cleanSlug = finalBusinessName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            // --- LOGICA DE TOKENS DINAMICOS ---
+            const finalPlan = plan === 'premium' ? 'premium' : 'gratis';
+            const finalTokens = finalPlan === 'premium' ? 100000 : 50;
 
-            const { error: insertError } = await supabase.from('usuarios').insert([{ 
+            const { error } = await supabase.from('usuarios').insert([{ 
                 slug: cleanSlug, 
                 email: email.trim().toLowerCase(), 
-                business_name: finalBusinessName, 
-                password: String(password), 
+                business_name: finalName, 
+                password: String(result.password), 
                 sheet_id: MASTER_SHEET_ID, 
                 precio: parseInt(precio) || 0, 
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {}, 
-                plan: plan || 'gratis',
-                tokens: parseInt(tokens) || 50,
-                mp_access_token: null
+                plan: finalPlan, 
+                tokens: finalTokens, // Se asigna según el plan
+                telefono: telefono || null // Agregado para que no de NULL
             }]);
-
-            if (insertError) return res.status(500).json({ error: "Error Supabase: " + insertError.message });
-
+            
+            if (error) throw error;
             res.json({ success: true, slug: cleanSlug });
-        } else {
-            res.status(400).json({ error: "Código incorrecto." });
-        }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        } else { res.status(400).json({ error: "Código incorrecto" }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- SESIÓN Y CONFIGURACIÓN ---
