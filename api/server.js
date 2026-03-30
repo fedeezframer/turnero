@@ -231,7 +231,7 @@ app.post("/api/request-verification", async (req, res) => {
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business_name, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        const { email, code, usuario, business_name, precio, duracion_turno, plan, horarios, telefono } = req.body;
         
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -241,12 +241,14 @@ app.post("/api/verify-and-register", async (req, res) => {
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            const finalName = business_name || result.usuario;
+            // Priorizamos business_name, si no viene, usamos usuario
+            const finalName = business_name || usuario || result.usuario;
             const cleanSlug = finalName.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
             
-            // --- LOGICA DE TOKENS DINAMICOS ---
-            const finalPlan = plan === 'premium' ? 'premium' : 'gratis';
-            const finalTokens = finalPlan === 'premium' ? 100000 : 50;
+            // Lógica de Plan y Tokens
+            const isPremium = plan === 'premium';
+            const finalPlan = isPremium ? 'premium' : 'gratis';
+            const finalTokens = isPremium ? 100000 : 50;
 
             const { error } = await supabase.from('usuarios').insert([{ 
                 slug: cleanSlug, 
@@ -258,23 +260,18 @@ app.post("/api/verify-and-register", async (req, res) => {
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {}, 
                 plan: finalPlan, 
-                tokens: finalTokens, // Se asigna según el plan
-                telefono: telefono || null // Agregado para que no de NULL
+                tokens: finalTokens,
+                telefono: telefono || null // Ahora si llegará el dato
             }]);
             
             if (error) throw error;
             res.json({ success: true, slug: cleanSlug });
-        } else { res.status(400).json({ error: "Código incorrecto" }); }
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- SESIÓN Y CONFIGURACIÓN ---
-app.get("/verify-session", async (req, res) => {
-    try {
-        const slug = getCleanSlug(req.query.u);
-        const { data: user } = await supabase.from('usuarios').select('slug').eq('slug', slug).single();
-        res.json({ active: !!user });
-    } catch (e) { res.json({ active: false }); }
+        } else { 
+            res.status(400).json({ error: "Código incorrecto" }); 
+        }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 app.post("/update-settings", async (req, res) => {
