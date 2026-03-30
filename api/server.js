@@ -205,39 +205,72 @@ app.post("/webhook", async (req, res) => {
 
 // --- LÓGICA DE REGISTRO VÍA GOOGLE APPS SCRIPT ---
 
-app.post("/api/request-verification", async (req, res) => {
+app.post("/api/verify-and-register", async (req, res) => {
     try {
-        // Recibimos TODO lo que viene de Framer
-        const { usuario, email, password, precio, duracion_turno, plan } = req.body;
-        if (!email || !usuario) return res.status(400).json({ error: "Faltan datos." });
+        const { 
+            email, code, 
+            business_name, phone, precio, duracion_turno, plan,
+            horarios // <--- Recibimos el objeto completo que viene del front
+        } = req.body;
 
+        if (!email || !code) return res.status(400).json({ error: "Faltan datos clave." });
+
+        // 1. Validamos el código con Google Scripts
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({ 
-                action: "createAttempt", 
-                usuario, 
-                email: email.trim().toLowerCase(), 
-                password,
-                // Pasamos estos datos extra para que el Script los guarde temporalmente
-                precio: precio || 0,
-                duracion_turno: duracion_turno || 30,
-                plan: plan || "gratis"
-            })
+            body: JSON.stringify({ action: "verifyCode", email: email.trim().toLowerCase(), code: code.toString().trim() })
         });
         const result = await googleRes.json();
-        
-        if (result.status === "success") {
-            res.json({ success: true });
+
+        if (result.status === "valid") {
+            const { usuario, password } = result;
+
+            // 2. Generamos el Slug
+            const cleanSlug = (business_name || usuario)
+                .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+            // 3. PROCESAMOS LOS HORARIOS
+            // Si el front mandó el objeto 'config', lo usamos. Si no, usamos uno por defecto.
+            const objetoHorariosFinal = horarios || {
+                lunes: { activo: true, jornada: ["09:00", "18:00"], descanso: ["13:00", "14:00"] },
+                martes: { activo: true, jornada: ["09:00", "18:00"], descanso: ["13:00", "14:00"] },
+                miercoles: { activo: true, jornada: ["09:00", "18:00"], descanso: ["13:00", "14:00"] },
+                jueves: { activo: true, jornada: ["09:00", "18:00"], descanso: ["13:00", "14:00"] },
+                viernes: { activo: true, jornada: ["09:00", "18:00"], descanso: ["13:00", "14:00"] },
+                sabado: { activo: true, jornada: ["09:00", "13:00"], descanso: [null, null] },
+                domingo: { activo: false, jornada: [null, null], descanso: [null, null] }
+            };
+
+            // 4. Insertamos en Supabase
+            const { error: insertError } = await supabase.from('usuarios').insert([{ 
+                slug: cleanSlug, 
+                email: email.trim().toLowerCase(), 
+                business_name: business_name || usuario, 
+                password: String(password), 
+                sheet_id: MASTER_SHEET_ID, 
+                precio: parseInt(precio) || 0, 
+                duracion_turno: parseInt(duracion_turno) || 30,
+                horarios: objetoHorariosFinal, // Guardamos el JSONB
+                plan: plan || 'gratis',
+                mp_access_token: null
+            }]);
+
+            if (insertError) {
+                console.error("Error Supabase:", insertError);
+                return res.status(500).json({ error: "Error en base de datos: " + insertError.message });
+            }
+
+            res.json({ success: true, slug: cleanSlug });
         } else {
-            throw new Error("Error al procesar el intento en Google Sheets");
+            res.status(400).json({ error: "Código incorrecto o expirado." });
         }
     } catch (e) {
-        console.error("Error en request-verification:", e.message);
+        console.error("Error en verify-and-register:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
-
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { 
