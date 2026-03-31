@@ -451,7 +451,7 @@ const finalData = {
         chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
         businessName: user.business_name || user.slug,
         tokens: user.tokens,
-        // AGREGAMOS HORARIOS ACÁ PARA QUE EL COMPONENTE LOS VEA
+        excepciones: user.excepciones || [],
         horarios: user.horarios, 
         config: { 
             duracion: user.duracion_turno, 
@@ -473,7 +473,8 @@ const finalData = {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, duracion_turno } = req.body;
+        // 'ocupados' son los días que bloqueaste en el calendario
+        const { slug, precio, horarios, duracion_turno, ocupados } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
         const { error: updateError } = await supabase
@@ -481,15 +482,19 @@ app.post("/update-settings", async (req, res) => {
             .update({ 
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
-                horarios: horarios
+                horarios: horarios,
+                excepciones: ocupados // <--- Guardamos el array de fechas bloqueadas
             })
             .eq('slug', cleanSlug);
 
         if (updateError) throw updateError;
+        
+        // Limpiamos caché para que el admin vea los cambios al toque
         delete globalCache[cleanSlug];
+        
         res.json({ success: true });
     } catch (e) { 
-        console.error("Error:", e.message);
+        console.error("Error en update-settings:", e.message);
         res.status(500).json({ error: e.message }); 
     }
 });
