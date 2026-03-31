@@ -388,12 +388,43 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, business_name, precio, duracion_turno, h_ini_j, h_fin_j, d_ini, d_fin } = req.body;
+        const { slug, business_name, precio, horarios, excepciones } = req.body;
         const cleanSlug = getCleanSlug(slug);
-        await supabase.from('usuarios').update({ business_name, precio: parseInt(precio), duracion_turno: parseInt(duracion_turno), hora_inicio_jornada: h_ini_j, hora_fin_jornada: h_fin_j, descanso_inicio: d_ini, descanso_fin: d_fin }).eq('slug', cleanSlug);
+
+        // 1. Primero obtenemos la config actual para no borrar otros datos (como duracion_turno)
+        const { data: user } = await supabase
+            .from('usuarios')
+            .select('config')
+            .eq('slug', cleanSlug)
+            .single();
+
+        const nuevaConfig = {
+            ...user?.config, // Mantenemos lo que ya había
+            precio: parseInt(precio),
+            horarios: horarios,    // El objeto con lunes, martes, etc.
+            excepciones: excepciones // El array de fechas YYYY-MM-DD
+        };
+
+        // 2. Actualizamos la tabla
+        const { error } = await supabase
+            .from('usuarios')
+            .update({ 
+                business_name, 
+                config: nuevaConfig // Guardamos todo el paquete en la columna config
+            })
+            .eq('slug', cleanSlug);
+
+        if (error) throw error;
+
+        // Limpiar caché para que el cliente vea los cambios al instante
         delete globalCache[cleanSlug];
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+        res.json({ success: true, message: "Configuración guardada correctamente" });
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 app.post("/cancel-appointment", async (req, res) => {
