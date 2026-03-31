@@ -388,40 +388,22 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, business_name, precio, horarios, excepciones } = req.body;
+        const { slug, precio, horarios, excepciones } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // 1. Traer la config actual para no borrar otros campos (como duracion_turno)
-        const { data: user, error: fetchError } = await supabase
-            .from('usuarios')
-            .select('config')
-            .eq('slug', cleanSlug)
-            .single();
-
-        if (fetchError) throw new Error("No se pudo obtener la configuración actual");
-
-        // 2. Unificar la nueva configuración
-        const nuevaConfig = {
-            ...(user?.config || {}), // Mantenemos lo que ya estaba (ej. mp_status, duracion)
-            precio: parseInt(precio) || 0,
-            horarios: horarios,
-            excepciones: excepciones || []
-        };
-
-        // 3. Update en la base de datos
+        // Update directo a las columnas que existen en tu SQL
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ 
-                // business_name: business_name, // Opcional si querés que se actualice la raíz
-                config: nuevaConfig 
+                precio: parseInt(precio) || 0,
+                horarios: horarios,
+                // Si querés guardar excepciones, deberías agregar la columna en SQL o meterla en horarios
             })
             .eq('slug', cleanSlug);
 
         if (updateError) throw updateError;
 
-        // 4. Limpiar caché para que los cambios se vean al instante
         delete globalCache[cleanSlug];
-
         res.json({ success: true });
     } catch (e) { 
         console.error("Error en update-settings:", e.message);
