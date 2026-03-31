@@ -333,6 +333,79 @@ app.post("/login", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- RECUPERACIÓN DE CONTRASEÑA ---
+app.post("/api/request-password-reset", async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+        if (!email || !newPassword) return res.status(400).json({ error: "Faltan datos." });
+
+        // 1. Verificar si el usuario existe de verdad en Supabase
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('slug')
+            .eq('email', email.trim().toLowerCase())
+            .single();
+
+        if (error || !user) {
+            return res.status(404).json({ error: "No existe una cuenta con ese correo." });
+        }
+
+        // 2. Si existe, le pedimos al Apps Script que mande el código
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({
+                action: "resetPassword",
+                email: email.trim().toLowerCase(),
+                newPassword: newPassword // Se guarda temporalmente en el Excel
+            })
+        });
+
+        const text = await googleRes.text();
+        const result = JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1));
+        
+        if (result.status === "success") res.json({ success: true });
+        else res.status(500).json({ error: result.message });
+
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post("/api/verify-and-reset-password", async (req, res) => {
+    try {
+        const { email, code } = req.body;
+
+        // 1. Validar el código con el Apps Script
+        const googleRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({ 
+                action: "verifyCode", 
+                email: email.trim().toLowerCase(), 
+                code: code.toString().trim() 
+            })
+        });
+        
+        const result = await googleRes.json();
+
+        if (result.status === "valid") {
+            // 2. El 'result.password' que viene del Apps Script es la NUEVA que guardamos antes
+            const { error } = await supabase
+                .from('usuarios')
+                .update({ password: String(result.password) })
+                .eq('email', email.trim().toLowerCase());
+
+            if (error) throw error;
+            res.json({ success: true });
+        } else {
+            res.status(400).json({ error: "Código incorrecto o expirado." });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- ADMIN Y CONFIG ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
