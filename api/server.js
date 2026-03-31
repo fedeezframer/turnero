@@ -391,7 +391,7 @@ app.post("/update-settings", async (req, res) => {
         const { slug, business_name, precio, horarios, excepciones } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // 1. Primero obtenemos la config actual para no borrar otros datos (como duracion_turno)
+        // Obtenemos la config actual para mantener campos que NO enviamos ahora
         const { data: user } = await supabase
             .from('usuarios')
             .select('config')
@@ -399,30 +399,25 @@ app.post("/update-settings", async (req, res) => {
             .single();
 
         const nuevaConfig = {
-            ...user?.config, // Mantenemos lo que ya había
+            ...user?.config, 
             precio: parseInt(precio),
-            horarios: horarios,    // El objeto con lunes, martes, etc.
-            excepciones: excepciones // El array de fechas YYYY-MM-DD
+            horarios: horarios,    // Aseguramos que el objeto llegue completo
+            excepciones: excepciones
         };
 
-        // 2. Actualizamos la tabla
         const { error } = await supabase
             .from('usuarios')
             .update({ 
                 business_name, 
-                config: nuevaConfig // Guardamos todo el paquete en la columna config
+                config: nuevaConfig 
             })
             .eq('slug', cleanSlug);
 
         if (error) throw error;
-
-        // Limpiar caché para que el cliente vea los cambios al instante
         delete globalCache[cleanSlug];
 
-        res.json({ success: true, message: "Configuración guardada correctamente" });
-
+        res.json({ success: true });
     } catch (e) { 
-        console.error(e);
         res.status(500).json({ error: e.message }); 
     }
 });
