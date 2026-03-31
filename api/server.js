@@ -368,19 +368,31 @@ app.get("/admin-stats/:slug", async (req, res) => {
             turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
         });
 
-        const finalData = {
-            stats: {
-                nombre_persona: user.nombre_persona,
-                turnosHoy, turnosMes: turnosMesActual,
-                ingresosEstimados: turnosMesActual * (user.precio || 0),
-                promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
-                chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
-                businessName: user.business_name || user.slug,
-                tokens: user.tokens,
-                config: { duracion: user.duracion_turno, h_ini_j: user.hora_inicio_jornada, h_fin_j: user.hora_fin_jornada, d_ini: user.descanso_inicio, d_fin: user.descanso_fin, precio: user.precio, mp_status: user.mp_access_token ? "Conectado" : "Desconectado", plan: user.plan },
-                turnosLista: turnosLista.reverse()
-            }
-        };
+const finalData = {
+    stats: {
+        nombre_persona: user.nombre_persona,
+        turnosHoy, 
+        turnosMes: turnosMesActual,
+        ingresosEstimados: turnosMesActual * (user.precio || 0),
+        promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
+        chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
+        businessName: user.business_name || user.slug,
+        tokens: user.tokens,
+        // AGREGAMOS HORARIOS ACÁ PARA QUE EL COMPONENTE LOS VEA
+        horarios: user.horarios, 
+        config: { 
+            duracion: user.duracion_turno, 
+            h_ini_j: user.hora_inicio_jornada, 
+            h_fin_j: user.hora_fin_jornada, 
+            d_ini: user.descanso_inicio, 
+            d_fin: user.descanso_fin, 
+            precio: user.precio, 
+            mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
+            plan: user.plan 
+        },
+        turnosLista: turnosLista.reverse()
+    }
+};
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
     } catch (e) { res.status(500).json({ error: e.message }); }
