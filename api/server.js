@@ -388,25 +388,23 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, excepciones } = req.body;
+        const { slug, precio, horarios, duracion_turno } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // Update directo a las columnas que existen en tu SQL
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ 
                 precio: parseInt(precio) || 0,
-                horarios: horarios,
-                // Si querés guardar excepciones, deberías agregar la columna en SQL o meterla en horarios
+                duracion_turno: parseInt(duracion_turno) || 30,
+                horarios: horarios
             })
             .eq('slug', cleanSlug);
 
         if (updateError) throw updateError;
-
         delete globalCache[cleanSlug];
         res.json({ success: true });
     } catch (e) { 
-        console.error("Error en update-settings:", e.message);
+        console.error("Error:", e.message);
         res.status(500).json({ error: e.message }); 
     }
 });
