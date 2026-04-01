@@ -407,17 +407,38 @@ app.post("/api/verify-and-reset-password", async (req, res) => {
 });
 
 // --- ADMIN Y CONFIG ---
+// --- ADMIN Y CONFIG ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
-    if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) return res.json(globalCache[slug].data);
+
+    // 1. Verificación de caché
+    if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
+        return res.json(globalCache[slug].data);
+    }
 
     try {
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
+        // 2. Traer usuario de Supabase
+        const { data: user, error: userError } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('slug', slug)
+            .single();
+
+        if (userError || !user) {
+            return res.status(404).json({ error: "Usuario no encontrado en la base de datos" });
+        }
+
+        // 3. Traer turnos de Google Sheets
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
+        const response = await sheets.spreadsheets.values.get({ 
+            spreadsheetId: MASTER_SHEET_ID, 
+            range: "A:E" 
+        });
+        
         const allRows = response.data.values || [];
-        const rows = allRows.filter((r, i) => i === 0 || r[4] === slug);
+        // Filtramos: Fila 0 (cabecera) o filas que coincidan con el slug del usuario
+        const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
         const mesActual = ahoraArg.getMonth() + 1;
@@ -429,6 +450,8 @@ app.get("/admin-stats/:slug", async (req, res) => {
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             const partes = r[2].toString().split(" - ");
+            if (partes.length < 2) return; // Evitar errores si el formato en la celda está mal
+
             const [dia, mes] = partes[0].split("/").map(Number);
             if (mes === mesActual) {
                 turnosMesActual++;
@@ -438,8 +461,46 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
-            turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
+            turnosLista.push({ 
+                nombre: r[0] || "Sin nombre", 
+                telefono: r[1] || "Sin tel", 
+                fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, 
+                hora: partes[1], 
+                rawTurno: r[2] 
+            });
         });
+
+        // 4. Construcción del objeto final asegurando valores por defecto
+        const finalData = {
+            stats: {
+                nombre_persona: user.nombre_persona || "Usuario",
+                turnosHoy, 
+                turnosMes: turnosMesActual,
+                ingresosEstimados: turnosMesActual * (user.precio || 0),
+                promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
+                chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
+                businessName: user.business_name || user.slug,
+                tokens: user.tokens || 0,
+                excepciones: user.excepciones || [],
+                horarios: user.horarios || {}, 
+                config: { 
+                    duracion: user.duracion_turno || 30, 
+                    precio: user.precio || 0, 
+                    mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
+                    plan: user.plan || "gratis" 
+                },
+                turnosLista: turnosLista.reverse()
+            }
+        };
+
+        globalCache[slug] = { timestamp: now, data: finalData };
+        res.json(finalData);
+
+    } catch (e) {
+        console.error("Error en admin-stats:", e.message);
+        res.status(500).json({ error: "Error interno del servidor", details: e.message });
+    }
+});
 
 const finalData = {
     stats: {
