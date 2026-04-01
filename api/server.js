@@ -220,7 +220,6 @@ app.post("/create-booking", async (req, res) => {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        // Validar tokens
         const { data: user } = await supabase.from('usuarios').select('plan, tokens').eq('slug', slug).single();
         if (user && user.plan === 'gratis' && user.tokens <= 0) {
             return res.status(403).json({ success: false, error: "Sin tokens disponibles." });
@@ -291,19 +290,16 @@ app.post("/api/verify-and-register", async (req, res) => {
 
         if (result.status === "valid") {
             const finalName = business_name || result.usuario || "Negocio";
-            
-            // Generar slug limpio
             const cleanSlug = finalName.toLowerCase().trim()
                 .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
                 .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
             
             const isPremium = plan === 'premium';
             
-            // INSERT EN SUPABASE
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
-                nombre_persona: nombre_persona, // <--- GUARDADO EN DB
+                nombre_persona: nombre_persona,
                 business_name: finalName,
                 password: String(result.password),
                 sheet_id: MASTER_SHEET_ID,
@@ -339,25 +335,21 @@ app.post("/api/request-password-reset", async (req, res) => {
         const { email, newPassword } = req.body;
         if (!email || !newPassword) return res.status(400).json({ error: "Faltan datos." });
 
-        // 1. Verificar si el usuario existe de verdad en Supabase
         const { data: user, error } = await supabase
             .from('usuarios')
             .select('slug')
             .eq('email', email.trim().toLowerCase())
             .single();
 
-        if (error || !user) {
-            return res.status(404).json({ error: "No existe una cuenta con ese correo." });
-        }
+        if (error || !user) return res.status(404).json({ error: "No existe una cuenta con ese correo." });
 
-        // 2. Si existe, le pedimos al Apps Script que mande el código
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({
                 action: "resetPassword",
                 email: email.trim().toLowerCase(),
-                newPassword: newPassword // Se guarda temporalmente en el Excel
+                newPassword: newPassword
             })
         });
 
@@ -366,17 +358,12 @@ app.post("/api/request-password-reset", async (req, res) => {
         
         if (result.status === "success") res.json({ success: true });
         else res.status(500).json({ error: result.message });
-
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/verify-and-reset-password", async (req, res) => {
     try {
         const { email, code } = req.body;
-
-        // 1. Validar el código con el Apps Script
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
@@ -386,50 +373,38 @@ app.post("/api/verify-and-reset-password", async (req, res) => {
                 code: code.toString().trim() 
             })
         });
-        
         const result = await googleRes.json();
-
         if (result.status === "valid") {
-            // 2. El 'result.password' que viene del Apps Script es la NUEVA que guardamos antes
             const { error } = await supabase
                 .from('usuarios')
                 .update({ password: String(result.password) })
                 .eq('email', email.trim().toLowerCase());
-
             if (error) throw error;
             res.json({ success: true });
         } else {
             res.status(400).json({ error: "Código incorrecto o expirado." });
         }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ADMIN Y CONFIG ---
 // --- ADMIN Y CONFIG ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
-    // 1. Verificación de caché
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
 
     try {
-        // 2. Traer usuario de Supabase
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
             .eq('slug', slug)
             .single();
 
-        if (userError || !user) {
-            return res.status(404).json({ error: "Usuario no encontrado en la base de datos" });
-        }
+        if (userError || !user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-        // 3. Traer turnos de Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: MASTER_SHEET_ID, 
@@ -437,7 +412,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const allRows = response.data.values || [];
-        // Filtramos: Fila 0 (cabecera) o filas que coincidan con el slug del usuario
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
@@ -450,7 +424,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         rows.forEach((r, i) => {
             if (i === 0 || !r[2]) return;
             const partes = r[2].toString().split(" - ");
-            if (partes.length < 2) return; // Evitar errores si el formato en la celda está mal
+            if (partes.length < 2) return;
 
             const [dia, mes] = partes[0].split("/").map(Number);
             if (mes === mesActual) {
@@ -470,7 +444,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             });
         });
 
-        // 4. Construcción del objeto final asegurando valores por defecto
         const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona || "Usuario",
@@ -495,67 +468,29 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
-
     } catch (e) {
-        console.error("Error en admin-stats:", e.message);
-        res.status(500).json({ error: "Error interno del servidor", details: e.message });
+        res.status(500).json({ error: e.message });
     }
-});
-
-const finalData = {
-    stats: {
-        nombre_persona: user.nombre_persona,
-        turnosHoy, 
-        turnosMes: turnosMesActual,
-        ingresosEstimados: turnosMesActual * (user.precio || 0),
-        promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
-        chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
-        businessName: user.business_name || user.slug,
-        tokens: user.tokens,
-        excepciones: user.excepciones || [],
-        horarios: user.horarios, 
-        config: { 
-            duracion: user.duracion_turno, 
-            h_ini_j: user.hora_inicio_jornada, 
-            h_fin_j: user.hora_fin_jornada, 
-            d_ini: user.descanso_inicio, 
-            d_fin: user.descanso_fin, 
-            precio: user.precio, 
-            mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
-            plan: user.plan 
-        },
-        turnosLista: turnosLista.reverse()
-    }
-};
-        globalCache[slug] = { timestamp: now, data: finalData };
-        res.json(finalData);
-    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/update-settings", async (req, res) => {
     try {
-        // 'ocupados' son los días que bloqueaste en el calendario
         const { slug, precio, horarios, duracion_turno, ocupados } = req.body;
         const cleanSlug = getCleanSlug(slug);
-
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ 
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios,
-                excepciones: ocupados // <--- Guardamos el array de fechas bloqueadas
+                excepciones: ocupados
             })
             .eq('slug', cleanSlug);
 
         if (updateError) throw updateError;
-        
-        // Limpiamos caché para que el admin vea los cambios al toque
         delete globalCache[cleanSlug];
-        
         res.json({ success: true });
     } catch (e) { 
-        console.error("Error en update-settings:", e.message);
         res.status(500).json({ error: e.message }); 
     }
 });
