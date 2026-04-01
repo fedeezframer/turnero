@@ -586,7 +586,9 @@ app.get("/verify-session", async (req, res) => {
         const slug = getCleanSlug(req.query.u);
         const { data: user } = await supabase.from('usuarios').select('slug').eq('slug', slug).single();
         res.json({ active: !!user });
-    } catch (e) { res.json({ active: false }); }
+    } catch (e) { 
+        res.json({ active: false }); 
+    }
 });
 
 const PORT = process.env.PORT || 10000;
