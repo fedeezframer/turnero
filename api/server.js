@@ -87,19 +87,40 @@ app.post("/api/create-preference", async (req, res) => {
         const { name, phone, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
+        // Buscamos el precio total, el token de MP, el método de pago activo y el monto de seña
         const { data: user, error: userError } = await supabase
             .from('usuarios')
-            .select('precio, business_name, mp_access_token')
+            .select('precio, business_name, mp_access_token, metodo_pago, monto_sena')
             .eq('slug', cleanSlug)
             .single();
 
-        if (userError || !user) return res.status(404).json({ error: "Negocio no encontrado." });
+        if (userError || !user) {
+            return res.status(404).json({ error: "Negocio no encontrado." });
+        }
 
-        const precioReal = Number(user.precio) || 0;
-        if (precioReal === 0) return res.json({ isFree: true });
+        // LÓGICA DE PRECIO DINÁMICO
+        // Si metodo_pago es 'sena', usamos monto_sena. Si no, usamos el precio total.
+        let precioReal = 0;
+        let conceptoPago = "Total";
 
+        if (user.metodo_pago === 'sena') {
+            precioReal = Number(user.monto_sena) || 0;
+            conceptoPago = "Seña";
+        } else {
+            precioReal = Number(user.precio) || 0;
+            conceptoPago = "Total";
+        }
+
+        // Si el precio final es 0, lo tratamos como reserva gratis
+        if (precioReal === 0) {
+            return res.json({ isFree: true });
+        }
+
+        // Verificamos si el negocio vinculó su Mercado Pago
         if (!user.mp_access_token) {
-            return res.status(400).json({ error: "Este negocio requiere pago pero no configuró Mercado Pago." });
+            return res.status(400).json({ 
+                error: "Este negocio requiere pago pero no configuró Mercado Pago." 
+            });
         }
 
         const clientMP = new MercadoPagoConfig({ accessToken: user.mp_access_token });
@@ -108,20 +129,35 @@ app.post("/api/create-preference", async (req, res) => {
         const response = await preference.create({
             body: {
                 items: [{
-                    title: `Reserva: ${fecha} - ${hora}hs`,
+                    title: `Reserva ${conceptoPago}: ${fecha} - ${hora}hs`,
                     unit_price: precioReal,
                     quantity: 1,
                     currency_id: "ARS"
                 }],
-                metadata: { nombre: name, telefono: phone, fecha, hora, slug: cleanSlug },
+                // Pasamos toda la info en metadata para que el Webhook la reciba después
+                metadata: { 
+                    nombre: name, 
+                    telefono: phone, 
+                    fecha, 
+                    hora, 
+                    slug: cleanSlug,
+                    tipo_pago: user.metodo_pago // 'sena' o 'total'
+                },
                 notification_url: "https://framerturnero.onrender.com/webhook",
-                back_urls: { success: "https://negosocio.framer.website/success" },
+                back_urls: { 
+                    success: "https://negosocio.framer.website/success",
+                    failure: "https://negosocio.framer.website/dashboard",
+                    pending: "https://negosocio.framer.website/dashboard"
+                },
                 auto_return: "approved"
             },
         });
 
+        // Enviamos la URL de pago de Mercado Pago al frontend
         res.json({ payment_url: response.init_point });
+
     } catch (error) {
+        console.error("Error en create-preference:", error.message);
         res.status(500).json({ error: error.message });
     }
 });
