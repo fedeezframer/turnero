@@ -463,24 +463,27 @@ app.get("/admin-stats/:slug", async (req, res) => {
             turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
         });
 
-        const finalData = {
+const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona,
-                turnosHoy, turnosMes: turnosMesActual,
+                turnosHoy, 
+                turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name,
                 tokens: user.tokens,
-                excepciones: user.excepciones,
                 horarios: user.horarios,
+                // AQUÍ ESTÁ EL CAMBIO CRUCIAL:
                 config: { 
                     duracion: user.duracion_turno, 
                     precio: user.precio, 
                     monto_sena: user.monto_sena || 0,
                     metodo_pago: user.metodo_pago || 'none',
                     mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
-                    plan: user.plan 
+                    plan: user.plan,
+                    // Agregamos las excepciones aquí dentro para que el Front las vea
+                    excepciones: user.excepciones || [] 
                 },
                 turnosLista: turnosLista.reverse()
             }
