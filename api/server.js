@@ -85,24 +85,31 @@ app.get("/", (req, res) => {
 app.post("/api/create-preference", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
+
+        // Limpiamos el slug asegurando que coincida con el formato de la base de datos
         const cleanSlug = getCleanSlug(slug);
 
-        // Buscamos el precio total, el token de MP, el método de pago activo y el monto de seña
+        console.log(`Intentando crear preferencia para: ${cleanSlug} (Original: ${slug})`);
+
+        // Buscamos los datos del usuario en Supabase
+        // Traemos '*' para asegurar que no falte ninguna columna necesaria (como metodo_pago)
         const { data: user, error: userError } = await supabase
             .from('usuarios')
-            .select('precio, business_name, mp_access_token, metodo_pago, monto_sena')
+            .select('*')
             .eq('slug', cleanSlug)
             .single();
 
+        // Si hay un error de Supabase o no encuentra el usuario
         if (userError || !user) {
+            console.error("Error buscando usuario:", userError ? userError.message : "No encontrado");
             return res.status(404).json({ error: "Negocio no encontrado." });
         }
 
         // LÓGICA DE PRECIO DINÁMICO
-        // Si metodo_pago es 'sena', usamos monto_sena. Si no, usamos el precio total.
         let precioReal = 0;
         let conceptoPago = "Total";
 
+        // Verificamos el método de pago configurado
         if (user.metodo_pago === 'sena') {
             precioReal = Number(user.monto_sena) || 0;
             conceptoPago = "Seña";
@@ -111,21 +118,27 @@ app.post("/api/create-preference", async (req, res) => {
             conceptoPago = "Total";
         }
 
-        // Si el precio final es 0, lo tratamos como reserva gratis
-        if (precioReal === 0) {
+        console.log(`Concepto: ${conceptoPago}, Precio a cobrar: ${precioReal}`);
+
+        // Si el precio final es 0, avisamos al frontend para que reserve directo sin Mercado Pago
+        if (precioReal <= 0) {
+            console.log("Precio es 0, desviando a reserva gratuita.");
             return res.json({ isFree: true });
         }
 
-        // Verificamos si el negocio vinculó su Mercado Pago
+        // Verificamos si el negocio vinculó su Mercado Pago (access token)
         if (!user.mp_access_token) {
+            console.error("El negocio no tiene mp_access_token vinculado.");
             return res.status(400).json({ 
                 error: "Este negocio requiere pago pero no configuró Mercado Pago." 
             });
         }
 
+        // Configuración de Mercado Pago con el token del VENDEDOR (el dueño del negocio)
         const clientMP = new MercadoPagoConfig({ accessToken: user.mp_access_token });
         const preference = new Preference(clientMP);
 
+        // Creamos la preferencia de pago
         const response = await preference.create({
             body: {
                 items: [{
@@ -134,16 +147,18 @@ app.post("/api/create-preference", async (req, res) => {
                     quantity: 1,
                     currency_id: "ARS"
                 }],
-                // Pasamos toda la info en metadata para que el Webhook la reciba después
+                // Metadata importante para el Webhook: se recupera cuando el pago se aprueba
                 metadata: { 
                     nombre: name, 
                     telefono: phone, 
-                    fecha, 
-                    hora, 
+                    fecha: fecha, 
+                    hora: hora, 
                     slug: cleanSlug,
-                    tipo_pago: user.metodo_pago // 'sena' o 'total'
+                    tipo_pago: user.metodo_pago || 'total'
                 },
+                // URL donde Mercado Pago enviará el aviso cuando el cliente pague
                 notification_url: "https://framerturnero.onrender.com/webhook",
+                // URLs de retorno para el cliente
                 back_urls: { 
                     success: "https://negosocio.framer.website/success",
                     failure: "https://negosocio.framer.website/dashboard",
@@ -153,11 +168,13 @@ app.post("/api/create-preference", async (req, res) => {
             },
         });
 
-        // Enviamos la URL de pago de Mercado Pago al frontend
+        console.log("Preferencia creada exitosamente:", response.id);
+
+        // Enviamos la URL de pago (init_point) al frontend para redirigir al usuario
         res.json({ payment_url: response.init_point });
 
     } catch (error) {
-        console.error("Error en create-preference:", error.message);
+        console.error("Error crítico en create-preference:", error.message);
         res.status(500).json({ error: error.message });
     }
 });
