@@ -511,12 +511,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, duracion_turno, ocupados } = req.body;
+        const { slug, precio, horarios, duracion_turno, ocupados, monto_sena } = req.body;
         const cleanSlug = getCleanSlug(slug);
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ 
                 precio: parseInt(precio) || 0,
+                monto_sena: parseInt(monto_sena) || 0, // AGREGADO
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios,
                 excepciones: ocupados
@@ -526,9 +527,7 @@ app.post("/update-settings", async (req, res) => {
         if (updateError) throw updateError;
         delete globalCache[cleanSlug];
         res.json({ success: true });
-    } catch (e) { 
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/cancel-appointment", async (req, res) => {
