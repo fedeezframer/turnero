@@ -516,30 +516,60 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, duracion_turno, ocupados, monto_sena, cobrar_total_activado } = req.body;
+        const { slug, precio, horarios, duracion_turno, excepciones, monto_sena, cobrar_total_activado, metodo_pago } = req.body;
+        
+        if (!slug) {
+            return res.status(400).json({ error: "El slug es obligatorio" });
+        }
+
         const cleanSlug = getCleanSlug(slug);
 
-        // Definimos el metodo_pago basado en los datos que llegan
+        // 1. Limpiamos y convertimos a números para evitar errores de tipo
+        const numPrecio = parseInt(precio) || 0;
+        const numSena = parseInt(monto_sena) || 0;
+        const numDuracion = parseInt(duracion_turno) || 30;
+
+        // 2. Determinamos el método de pago con prioridad clara
         let metodoPagoFinal = 'none';
-        if (monto_sena > 0) metodoPagoFinal = 'sena';
-        else if (cobrar_total_activado) metodoPagoFinal = 'total';
+        if (metodo_pago) {
+            metodoPagoFinal = metodo_pago;
+        } else if (numSena > 0) {
+            metodoPagoFinal = 'sena';
+        } else if (cobrar_total_activado === true || cobrar_total_activado === "true") {
+            metodoPagoFinal = 'total';
+        }
+
+        // 3. Construimos el objeto de actualización solo con lo que recibimos
+        const updateData = {
+            precio: numPrecio,
+            monto_sena: numSena,
+            metodo_pago: metodoPagoFinal,
+            duracion_turno: numDuracion
+        };
+
+        // Solo agregamos estos si vienen en el body (para no pisar con undefined)
+        if (horarios) updateData.horarios = horarios;
+        if (excepciones) updateData.excepciones = excepciones;
+
+        console.log("Actualizando settings para:", cleanSlug, updateData);
 
         const { error: updateError } = await supabase
             .from('usuarios')
-            .update({ 
-                precio: parseInt(precio) || 0,
-                monto_sena: parseInt(monto_sena) || 0,
-                metodo_pago: metodoPagoFinal, // <--- IMPORTANTE: Actualizamos el modo
-                duracion_turno: parseInt(duracion_turno) || 30,
-                horarios: horarios,
-                excepciones: ocupados
-            })
+            .update(updateData)
             .eq('slug', cleanSlug);
 
-        if (updateError) throw updateError;
+        if (updateError) {
+            console.error("Error de Supabase:", updateError);
+            throw updateError;
+        }
+
         delete globalCache[cleanSlug];
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+    } catch (e) {
+        console.error("Error crítico en /update-settings:", e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post("/cancel-appointment", async (req, res) => {
