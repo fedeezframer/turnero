@@ -424,6 +424,7 @@ app.post("/api/verify-and-reset-password", async (req, res) => {
 });
 
 // --- ADMIN Y CONFIG ---
+
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
@@ -442,11 +443,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         if (userError || !user) return res.status(404).json({ error: "Usuario no encontrado" });
 
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ 
-            spreadsheetId: MASTER_SHEET_ID, 
-            range: "A:E" 
-        });
-        
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const allRows = response.data.values || [];
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
@@ -461,7 +458,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             if (i === 0 || !r[2]) return;
             const partes = r[2].toString().split(" - ");
             if (partes.length < 2) return;
-
             const [dia, mes] = partes[0].split("/").map(Number);
             if (mes === mesActual) {
                 turnosMesActual++;
@@ -471,32 +467,26 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
-            turnosLista.push({ 
-                nombre: r[0] || "Sin nombre", 
-                telefono: r[1] || "Sin tel", 
-                fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, 
-                hora: partes[1], 
-                rawTurno: r[2] 
-            });
+            turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
         });
 
         const finalData = {
             stats: {
-                nombre_persona: user.nombre_persona || "Usuario",
-                turnosHoy, 
-                turnosMes: turnosMesActual,
+                nombre_persona: user.nombre_persona,
+                turnosHoy, turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
-                businessName: user.business_name || user.slug,
-                tokens: user.tokens || 0,
-                excepciones: user.excepciones || [],
-                horarios: user.horarios || {}, 
+                businessName: user.business_name,
+                tokens: user.tokens,
+                excepciones: user.excepciones,
+                horarios: user.horarios,
                 config: { 
-                    duracion: user.duracion_turno || 30, 
-                    precio: user.precio || 0, 
+                    duracion: user.duracion_turno, 
+                    precio: user.precio, 
+                    monto_sena: user.monto_sena || 0, // AGREGADO
                     mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
-                    plan: user.plan || "gratis" 
+                    plan: user.plan 
                 },
                 turnosLista: turnosLista.reverse()
             }
@@ -504,9 +494,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/update-settings", async (req, res) => {
