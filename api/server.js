@@ -499,13 +499,20 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, duracion_turno, ocupados, monto_sena } = req.body;
+        const { slug, precio, horarios, duracion_turno, ocupados, monto_sena, cobrar_total_activado } = req.body;
         const cleanSlug = getCleanSlug(slug);
+
+        // Definimos el metodo_pago basado en los datos que llegan
+        let metodoPagoFinal = 'none';
+        if (monto_sena > 0) metodoPagoFinal = 'sena';
+        else if (cobrar_total_activado) metodoPagoFinal = 'total';
+
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ 
                 precio: parseInt(precio) || 0,
-                monto_sena: parseInt(monto_sena) || 0, // AGREGADO
+                monto_sena: parseInt(monto_sena) || 0,
+                metodo_pago: metodoPagoFinal, // <--- IMPORTANTE: Actualizamos el modo
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios,
                 excepciones: ocupados
