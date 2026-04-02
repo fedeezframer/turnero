@@ -85,31 +85,24 @@ app.get("/", (req, res) => {
 app.post("/api/create-preference", async (req, res) => {
     try {
         const { name, phone, fecha, hora, slug } = req.body;
-
-        // Limpiamos el slug asegurando que coincida con el formato de la base de datos
         const cleanSlug = getCleanSlug(slug);
 
-        console.log(`Intentando crear preferencia para: ${cleanSlug} (Original: ${slug})`);
+        console.log(`Intentando crear preferencia para: ${cleanSlug}`);
 
-        // Buscamos los datos del usuario en Supabase
-        // Traemos '*' para asegurar que no falte ninguna columna necesaria (como metodo_pago)
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
             .eq('slug', cleanSlug)
             .single();
 
-        // Si hay un error de Supabase o no encuentra el usuario
         if (userError || !user) {
-            console.error("Error buscando usuario:", userError ? userError.message : "No encontrado");
             return res.status(404).json({ error: "Negocio no encontrado." });
         }
 
-        // LÓGICA DE PRECIO DINÁMICO
         let precioReal = 0;
         let conceptoPago = "Total";
 
-        // Verificamos el método de pago configurado
+        // Lógica de precio basada en la nueva columna metodo_pago
         if (user.metodo_pago === 'sena') {
             precioReal = Number(user.monto_sena) || 0;
             conceptoPago = "Seña";
@@ -118,27 +111,15 @@ app.post("/api/create-preference", async (req, res) => {
             conceptoPago = "Total";
         }
 
-        console.log(`Concepto: ${conceptoPago}, Precio a cobrar: ${precioReal}`);
+        if (precioReal <= 0) return res.json({ isFree: true });
 
-        // Si el precio final es 0, avisamos al frontend para que reserve directo sin Mercado Pago
-        if (precioReal <= 0) {
-            console.log("Precio es 0, desviando a reserva gratuita.");
-            return res.json({ isFree: true });
-        }
-
-        // Verificamos si el negocio vinculó su Mercado Pago (access token)
         if (!user.mp_access_token) {
-            console.error("El negocio no tiene mp_access_token vinculado.");
-            return res.status(400).json({ 
-                error: "Este negocio requiere pago pero no configuró Mercado Pago." 
-            });
+            return res.status(400).json({ error: "Este negocio no configuró Mercado Pago." });
         }
 
-        // Configuración de Mercado Pago con el token del VENDEDOR (el dueño del negocio)
         const clientMP = new MercadoPagoConfig({ accessToken: user.mp_access_token });
         const preference = new Preference(clientMP);
 
-        // Creamos la preferencia de pago
         const response = await preference.create({
             body: {
                 items: [{
@@ -147,7 +128,6 @@ app.post("/api/create-preference", async (req, res) => {
                     quantity: 1,
                     currency_id: "ARS"
                 }],
-                // Metadata importante para el Webhook: se recupera cuando el pago se aprueba
                 metadata: { 
                     nombre: name, 
                     telefono: phone, 
@@ -156,9 +136,7 @@ app.post("/api/create-preference", async (req, res) => {
                     slug: cleanSlug,
                     tipo_pago: user.metodo_pago || 'total'
                 },
-                // URL donde Mercado Pago enviará el aviso cuando el cliente pague
                 notification_url: "https://framerturnero.onrender.com/webhook",
-                // URLs de retorno para el cliente
                 back_urls: { 
                     success: "https://negosocio.framer.website/success",
                     failure: "https://negosocio.framer.website/dashboard",
@@ -168,13 +146,10 @@ app.post("/api/create-preference", async (req, res) => {
             },
         });
 
-        console.log("Preferencia creada exitosamente:", response.id);
-
-        // Enviamos la URL de pago (init_point) al frontend para redirigir al usuario
         res.json({ payment_url: response.init_point });
 
     } catch (error) {
-        console.error("Error crítico en create-preference:", error.message);
+        console.error("Error en create-preference:", error.message);
         res.status(500).json({ error: error.message });
     }
 });
@@ -209,7 +184,7 @@ app.get("/oauth-callback", async (req, res) => {
     }
 });
 
-// --- WEBHOOK UNIFICADO (PAGOS Y SUSCRIPCIONES) ---
+// --- WEBHOOK UNIFICADO ---
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
@@ -361,7 +336,8 @@ app.post("/api/verify-and-register", async (req, res) => {
                 horarios: horarios || {},
                 plan: isPremium ? 'premium' : 'gratis',
                 tokens: isPremium ? 100000 : 50,
-                telefono: telefono || null
+                telefono: telefono || null,
+                metodo_pago: 'none'
             }]);
 
             if (error) throw error;
@@ -440,7 +416,7 @@ app.post("/api/verify-and-reset-password", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ADMIN Y CONFIG ---
+// --- ADMIN Y CONFIG (CORREGIDO) ---
 
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
@@ -501,7 +477,8 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 config: { 
                     duracion: user.duracion_turno, 
                     precio: user.precio, 
-                    monto_sena: user.monto_sena || 0, // AGREGADO
+                    monto_sena: user.monto_sena || 0,
+                    metodo_pago: user.metodo_pago || 'none',
                     mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
                     plan: user.plan 
                 },
@@ -516,59 +493,41 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
 app.post("/update-settings", async (req, res) => {
     try {
-        const { slug, precio, horarios, duracion_turno, excepciones, monto_sena, cobrar_total_activado, metodo_pago } = req.body;
-        
-        if (!slug) {
-            return res.status(400).json({ error: "El slug es obligatorio" });
-        }
-
+        const { slug, precio, horarios, duracion_turno, ocupados, monto_sena, cobrar_total_activado, metodo_pago } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        // 1. Limpiamos y convertimos a números para evitar errores de tipo
         const numPrecio = parseInt(precio) || 0;
         const numSena = parseInt(monto_sena) || 0;
-        const numDuracion = parseInt(duracion_turno) || 30;
 
-        // 2. Determinamos el método de pago con prioridad clara
-        let metodoPagoFinal = 'none';
-        if (metodo_pago) {
-            metodoPagoFinal = metodo_pago;
-        } else if (numSena > 0) {
-            metodoPagoFinal = 'sena';
-        } else if (cobrar_total_activado === true || cobrar_total_activado === "true") {
-            metodoPagoFinal = 'total';
+        // Si no mandamos el metodo_pago explícito desde el front, lo calculamos aquí
+        let metodoPagoFinal = metodo_pago;
+        if (!metodoPagoFinal) {
+            if (numSena > 0) metodoPagoFinal = 'sena';
+            else if (cobrar_total_activado) metodoPagoFinal = 'total';
+            else metodoPagoFinal = 'none';
         }
 
-        // 3. Construimos el objeto de actualización solo con lo que recibimos
-        const updateData = {
+        const updateData = { 
             precio: numPrecio,
             monto_sena: numSena,
             metodo_pago: metodoPagoFinal,
-            duracion_turno: numDuracion
+            duracion_turno: parseInt(duracion_turno) || 30
         };
 
-        // Solo agregamos estos si vienen en el body (para no pisar con undefined)
         if (horarios) updateData.horarios = horarios;
-        if (excepciones) updateData.excepciones = excepciones;
-
-        console.log("Actualizando settings para:", cleanSlug, updateData);
+        if (ocupados) updateData.excepciones = ocupados;
 
         const { error: updateError } = await supabase
             .from('usuarios')
             .update(updateData)
             .eq('slug', cleanSlug);
 
-        if (updateError) {
-            console.error("Error de Supabase:", updateError);
-            throw updateError;
-        }
-
+        if (updateError) throw updateError;
         delete globalCache[cleanSlug];
         res.json({ success: true });
-
-    } catch (e) {
-        console.error("Error crítico en /update-settings:", e.message);
-        res.status(500).json({ error: e.message });
+    } catch (e) { 
+        console.error("Error en update-settings:", e.message);
+        res.status(500).json({ error: e.message }); 
     }
 });
 
