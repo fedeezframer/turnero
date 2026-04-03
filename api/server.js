@@ -188,6 +188,7 @@ app.get("/oauth-callback", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
+    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Clientes finales) ---
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data.id;
         try {
@@ -198,11 +199,15 @@ app.post("/webhook", async (req, res) => {
 
             if (paymentData.status === "approved") {
                 const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
+                
+                // Formateo de fecha para el Google Sheet
                 const partes = fecha.split("-");
                 const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                 const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                 const sheets = await getSheets();
+                
+                // Antes de agregar, podrías chequear duplicados, pero por ahora mantenemos tu lógica de append
                 await sheets.spreadsheets.values.append({
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
@@ -212,10 +217,14 @@ app.post("/webhook", async (req, res) => {
 
                 await handleTokenDiscount(slug);
                 delete globalCache[slug];
+                console.log(`✅ Turno agendado para el socio: ${slug}`);
             }
-        } catch (e) { console.error("Error Webhook Payment:", e.message); }
+        } catch (e) { 
+            console.error("❌ Error Webhook Payment (Turnos):", e.message); 
+        }
     }
 
+    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus ingresos de NEGOSOCIO) ---
     if (body.type === "subscription_preapproval") {
         try {
             const subId = body.data.id;
@@ -223,11 +232,31 @@ app.post("/webhook", async (req, res) => {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
             const subData = await response.json();
+
+            // Si el estado es "authorized" significa que el primer pago o la suscripción está activa
             if (subData.status === "authorized") {
-                await supabase.from('usuarios').update({ plan: 'premium', tokens: 100000 }).eq('email', subData.payer_email);
+                // Calculamos 30 días exactos desde hoy para el vencimiento
+                const fechaVencimiento = new Date();
+                fechaVencimiento.setDate(fechaVencimiento.getDate() + 30);
+
+                const { error } = await supabase
+                    .from('usuarios')
+                    .update({ 
+                        plan: 'premium', 
+                        tokens: 100000,
+                        subscription_expiry: fechaVencimiento.toISOString() // Formato timestamptz para Supabase
+                    })
+                    .eq('email', subData.payer_email); // Buscamos por el mail de quien pagó
+
+                if (error) throw error;
+                console.log(`🚀 SOCIO AL DÍA: ${subData.payer_email} ahora es Premium hasta ${fechaVencimiento.toLocaleDateString('es-AR')}`);
             }
-        } catch (e) { console.error("Error Webhook Premium:", e.message); }
+        } catch (e) { 
+            console.error("❌ Error Webhook Suscripción (Socio):", e.message); 
+        }
     }
+
+    // Siempre respondemos 200 para que Mercado Pago no reintente infinitamente
     res.sendStatus(200);
 });
 
