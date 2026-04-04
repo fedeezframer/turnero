@@ -267,6 +267,37 @@ if (body.type === "subscription_preapproval" || body.action === "created") {
     }
 }
 
+app.post("/api/create-subscription", async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        const response = await fetch("https://api.mercadopago.com/preapproval_plan", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                reason: "Plan Premium NegoSocio",
+                auto_recurring: {
+                    frequency: 1,
+                    frequency_type: "months",
+                    transaction_amount: 5000, // Poné tu precio acá
+                    currency_id: "ARS"
+                },
+                back_url: "https://negosocio.framer.website/verificar-cuenta?email=" + email,
+                status: "active"
+            })
+        });
+
+        const plan = await response.json();
+        // Este 'init_point' es el que mandamos al frontend para que el usuario haga clic
+        res.json({ sandbox_init_point: plan.init_point }); 
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+    
 // --- GESTIÓN DE TURNOS ---
 app.get("/get-occupied", async (req, res) => {
     try {
