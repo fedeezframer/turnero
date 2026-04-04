@@ -406,6 +406,16 @@ app.post("/api/verify-and-register", async (req, res) => {
             
             const isPremium = plan === 'premium';
             
+            // --- NUEVO: DAR GRACIA DE 1 HORA AL REGISTRARSE ---
+            // Esto evita que el socio quede bloqueado antes de que llegue el Webhook de MP
+            let fechaVencimientoInicial = null;
+            if (isPremium) {
+                const ahora = new Date();
+                ahora.setHours(ahora.getHours() + 1); // 1 hora de margen
+                fechaVencimientoInicial = ahora.toISOString();
+            }
+            // --------------------------------------------------
+
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
@@ -419,7 +429,8 @@ app.post("/api/verify-and-register", async (req, res) => {
                 plan: isPremium ? 'premium' : 'gratis',
                 tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
-                metodo_pago: 'none'
+                metodo_pago: 'none',
+                subscription_expiry: fechaVencimientoInicial // <--- Agregamos esto
             }]);
 
             if (error) throw error;
@@ -427,7 +438,10 @@ app.post("/api/verify-and-register", async (req, res) => {
         } else {
             res.status(400).json({ error: "Código incorrecto" });
         }
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        console.error("Error en registro:", e.message);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 app.post("/login", async (req, res) => {
