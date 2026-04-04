@@ -108,7 +108,6 @@ app.post("/api/create-preference", async (req, res) => {
                 });
             }
         }
-        // ---------------------------------------
 
         let precioReal = 0;
         let conceptoPago = "Total";
@@ -198,7 +197,7 @@ app.get("/oauth-callback", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
     
-    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Clientes finales) ---
+    // --- 1. LÓGICA PARA PAGOS DE TURNOS ---
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data.id;
         try {
@@ -210,14 +209,12 @@ app.post("/webhook", async (req, res) => {
             if (paymentData.status === "approved") {
                 const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
                 
-                // Formateo de fecha para el Google Sheet
                 const partes = fecha.split("-");
                 const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                 const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                 const sheets = await getSheets();
                 
-                // Antes de agregar, podrías chequear duplicados, pero por ahora mantenemos tu lógica de append
                 await sheets.spreadsheets.values.append({
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
@@ -230,44 +227,43 @@ app.post("/webhook", async (req, res) => {
                 console.log(`✅ Turno agendado para el socio: ${slug}`);
             }
         } catch (e) { 
-            console.error("❌ Error Webhook Payment (Turnos):", e.message); 
+            console.error("❌ Error Webhook Payment:", e.message); 
         }
     }
+
+    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (DENTRO DEL WEBHOOK) ---
+    if (body.type === "subscription_preapproval" || body.action === "created") {
+        try {
+            const subId = body.data?.id || body.id; 
+            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            });
+            const subData = await response.json();
+
+            if (subData.status === "authorized") {
+                const fechaVencimiento = new Date();
+                fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1);
+                fechaVencimiento.setDate(fechaVencimiento.getDate() + 2); 
+
+                const { error } = await supabase
+                    .from('usuarios')
+                    .update({ 
+                        plan: 'premium', 
+                        tokens: 100000,
+                        subscription_expiry: fechaVencimiento.toISOString()
+                    })
+                    .eq('email', subData.payer_email.trim().toLowerCase()); 
+
+                if (error) throw error;
+                console.log(`🚀 PREMIUM ACTIVADO: ${subData.payer_email}`);
+            }
+        } catch (e) { 
+            console.error("❌ Error Webhook Suscripción:", e.message); 
+        }
+    }
+
     res.sendStatus(200);
 });
-
-  // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
-if (body.type === "subscription_preapproval" || body.action === "created") {
-    try {
-        const subId = body.data?.id || body.id; 
-        const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
-            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
-        });
-        const subData = await response.json();
-
-        if (subData.status === "authorized") {
-            const fechaVencimiento = new Date();
-            fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1);
-            // Agregamos 2 días extra de "gracia" por las dudas que falle un pago automático
-            fechaVencimiento.setDate(fechaVencimiento.getDate() + 2); 
-
-            const { error } = await supabase
-                .from('usuarios')
-                .update({ 
-                    plan: 'premium', 
-                    tokens: 100000,
-                    subscription_expiry: fechaVencimiento.toISOString()
-                })
-                // IMPORTANTE: Mercado Pago usa 'payer_email', asegúrate que coincida con tu base
-                .eq('email', subData.payer_email.trim().toLowerCase()); 
-
-            if (error) throw error;
-            console.log(`🚀 PREMIUM ACTIVADO: ${subData.payer_email}`);
-        }
-    } catch (e) { 
-        console.error("❌ Error Webhook Suscripción:", e.message); 
-    }
-}
 
 app.post("/api/create-subscription", async (req, res) => {
     try {
@@ -284,7 +280,7 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 5000, // Poné tu precio acá
+                    transaction_amount: 5000,
                     currency_id: "ARS"
                 },
                 back_url: "https://negosocio.framer.website/verificar-cuenta?email=" + email,
@@ -293,7 +289,6 @@ app.post("/api/create-subscription", async (req, res) => {
         });
 
         const plan = await response.json();
-        // Este 'init_point' es el que mandamos al frontend para que el usuario haga clic
         res.json({ sandbox_init_point: plan.init_point }); 
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -317,7 +312,6 @@ app.post("/create-booking", async (req, res) => {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        // 1. Obtener datos completos del usuario (incluyendo plan y vencimiento)
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
@@ -328,12 +322,10 @@ app.post("/create-booking", async (req, res) => {
             return res.status(404).json({ success: false, error: "Negocio no encontrado." });
         }
 
-        // --- 2. LÓGICA DE CANDADO PARA PREMIUM ---
         if (user.plan === 'premium') {
             const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
 
-            // Si es premium pero venció o no tiene fecha, bloqueamos la reserva
             if (!vencimiento || ahoraArg > vencimiento) {
                 return res.status(403).json({ 
                     success: false, 
@@ -342,27 +334,22 @@ app.post("/create-booking", async (req, res) => {
             }
         }
 
-        // --- 3. LÓGICA DE TOKENS PARA GRATIS ---
         if (user.plan === 'gratis' && user.tokens <= 0) {
             return res.status(403).json({ success: false, error: "Sin tokens disponibles en este negocio." });
         }
 
-        // 4. Conectar con Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
 
-        // 5. Evitar duplicados (un turno por teléfono por negocio)
         if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
             return res.status(400).json({ success: false, error: "Ya tenés un turno agendado en este negocio." });
         }
 
-        // 6. Formatear datos para el append
-        const partes = fecha.split("-"); // Asumiendo YYYY-MM-DD
+        const partes = fecha.split("-");
         const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
-        // 7. Guardar en Google Sheets
         await sheets.spreadsheets.values.append({
             spreadsheetId: MASTER_SHEET_ID,
             range: "A:E",
@@ -378,10 +365,8 @@ app.post("/create-booking", async (req, res) => {
             }
         });
 
-        // 8. Descontar token si corresponde y limpiar caché
         await handleTokenDiscount(slug);
         delete globalCache[slug];
-
         res.json({ success: true });
 
     } catch (e) { 
@@ -437,16 +422,12 @@ app.post("/api/verify-and-register", async (req, res) => {
                 .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
             
             const isPremium = plan === 'premium';
-            
-            // --- NUEVO: DAR GRACIA DE 1 HORA AL REGISTRARSE ---
-            // Esto evita que el socio quede bloqueado antes de que llegue el Webhook de MP
             let fechaVencimientoInicial = null;
             if (isPremium) {
                 const ahora = new Date();
-                ahora.setHours(ahora.getHours() + 1); // 1 hora de margen
+                ahora.setHours(ahora.getHours() + 1); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
-            // --------------------------------------------------
 
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
@@ -462,7 +443,7 @@ app.post("/api/verify-and-register", async (req, res) => {
                 tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
                 metodo_pago: 'none',
-                subscription_expiry: fechaVencimientoInicial // <--- Agregamos esto
+                subscription_expiry: fechaVencimientoInicial
             }]);
 
             if (error) throw error;
@@ -486,7 +467,6 @@ app.post("/login", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- RECUPERACIÓN DE CONTRASEÑA ---
 app.post("/api/request-password-reset", async (req, res) => {
     try {
         const { email, newPassword } = req.body;
@@ -544,19 +524,16 @@ app.post("/api/verify-and-reset-password", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ADMIN Y CONFIG (CORREGIDO) ---
-
+// --- ADMIN Y CONFIG ---
 app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
-    // 1. Check de Caché
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
 
     try {
-        // 2. Obtener datos del usuario en Supabase
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
@@ -565,29 +542,22 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         if (userError || !user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-        // --- 3. LÓGICA DE CANDADO INTELIGENTE ---
         if (user.plan === 'premium') {
             const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
 
-            // Si es premium pero la fecha venció o no existe, bloqueamos
             if (!vencimiento || ahoraArg > vencimiento) {
                 return res.status(402).json({ 
                     error: "Suscripción Premium vencida",
                     expired: true,
-                    message: "Socio, tu suscripción Premium ha expirado. Renová tu plan para acceder al panel." 
+                    message: "Socio, tu suscripción Premium ha expirado." 
                 });
             }
         }
-        // Si el plan es 'gratis', no chequeamos tiempo, pasa directo.
-        // ---------------------------------------
 
-        // 4. Obtener turnos de Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const allRows = response.data.values || [];
-        
-        // Filtramos turnos que pertenezcan a este slug
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
@@ -607,8 +577,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
-                
-                // Agrupar para el gráfico
                 if (dia <= 7) semanas["Sem 1"]++;
                 else if (dia <= 14) semanas["Sem 2"]++;
                 else if (dia <= 21) semanas["Sem 3"]++;
@@ -624,7 +592,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             });
         });
 
-        // 5. Construcción de respuesta final
         const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona,
@@ -643,14 +610,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     metodo_pago: user.metodo_pago || 'none',
                     mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
                     plan: user.plan,
-                    vencimiento: user.subscription_expiry, // Enviamos la fecha para que el Front la muestre
+                    vencimiento: user.subscription_expiry,
                     excepciones: user.excepciones || [] 
                 },
                 turnosLista: turnosLista.reverse()
             }
         };
 
-        // 6. Guardar en caché y responder
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
 
@@ -659,6 +625,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         res.status(500).json({ error: e.message }); 
     }
 });
+
 app.post("/update-settings", async (req, res) => {
     try {
         const { slug, precio, horarios, duracion_turno, ocupados, monto_sena, cobrar_total_activado, metodo_pago } = req.body;
@@ -667,7 +634,6 @@ app.post("/update-settings", async (req, res) => {
         const numPrecio = parseInt(precio) || 0;
         const numSena = parseInt(monto_sena) || 0;
 
-        // Si no mandamos el metodo_pago explícito desde el front, lo calculamos aquí
         let metodoPagoFinal = metodo_pago;
         if (!metodoPagoFinal) {
             if (numSena > 0) metodoPagoFinal = 'sena';
