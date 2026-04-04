@@ -233,6 +233,8 @@ app.post("/webhook", async (req, res) => {
             console.error("❌ Error Webhook Payment (Turnos):", e.message); 
         }
     }
+    res.sendStatus(200);
+});
 
   // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
 if (body.type === "subscription_preapproval" || body.action === "created") {
