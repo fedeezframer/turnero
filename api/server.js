@@ -231,31 +231,47 @@ app.post("/webhook", async (req, res) => {
         }
     }
 
-    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (DENTRO DEL WEBHOOK) ---
-    if (body.type === "subscription_preapproval" || body.action === "created") {
+// --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
+    if (body.type === "subscription_preapproval") {
         try {
+            // Mercado Pago puede mandar el ID en distintos lugares según la versión
             const subId = body.data?.id || body.id; 
+            
+            if (!subId) {
+                console.log("⚠️ Webhook de suscripción sin ID válido");
+                return res.sendStatus(200);
+            }
+
+            console.log(`🔎 Buscando suscripción en MP: ${subId}`);
+
             const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
                 headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
             });
             const subData = await response.json();
 
-            if (subData.status === "authorized") {
+            // "authorized" significa que el pago de la suscripción entró bien
+            if (subData.status === "authorized" || subData.status === "active") {
                 const fechaVencimiento = new Date();
                 fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1);
                 fechaVencimiento.setDate(fechaVencimiento.getDate() + 2); 
 
-                const { error } = await supabase
+                const { data: userUpdated, error } = await supabase
                     .from('usuarios')
                     .update({ 
                         plan: 'premium', 
                         tokens: 100000,
                         subscription_expiry: fechaVencimiento.toISOString()
                     })
-                    .eq('email', subData.payer_email.trim().toLowerCase()); 
+                    .eq('email', subData.payer_email.trim().toLowerCase())
+                    .select(); // Agregamos select para confirmar en el log
 
                 if (error) throw error;
-                console.log(`🚀 PREMIUM ACTIVADO: ${subData.payer_email}`);
+                
+                if (userUpdated && userUpdated.length > 0) {
+                    console.log(`🚀 PREMIUM ACTIVADO con éxito para: ${subData.payer_email}`);
+                } else {
+                    console.log(`⚠️ Se recibió el pago pero no se encontró usuario con el mail: ${subData.payer_email}`);
+                }
             }
         } catch (e) { 
             console.error("❌ Error Webhook Suscripción:", e.message); 
