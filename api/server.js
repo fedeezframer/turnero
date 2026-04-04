@@ -234,10 +234,10 @@ app.post("/webhook", async (req, res) => {
         }
     }
 
-    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus ingresos de NEGOSOCIO) ---
-   if (body.type === "subscription_preapproval" || body.action === "created") {
+  // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
+if (body.type === "subscription_preapproval" || body.action === "created") {
     try {
-        const subId = body.data ? body.data.id : body.id; // Doble check de ID
+        const subId = body.data?.id || body.id; 
         const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
             headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
         });
@@ -245,7 +245,9 @@ app.post("/webhook", async (req, res) => {
 
         if (subData.status === "authorized") {
             const fechaVencimiento = new Date();
-            fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1); // +1 Mes exacto
+            fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1);
+            // Agregamos 2 días extra de "gracia" por las dudas que falle un pago automático
+            fechaVencimiento.setDate(fechaVencimiento.getDate() + 2); 
 
             const { error } = await supabase
                 .from('usuarios')
@@ -254,19 +256,16 @@ app.post("/webhook", async (req, res) => {
                     tokens: 100000,
                     subscription_expiry: fechaVencimiento.toISOString()
                 })
-                .eq('email', subData.payer_email);
+                // IMPORTANTE: Mercado Pago usa 'payer_email', asegúrate que coincida con tu base
+                .eq('email', subData.payer_email.trim().toLowerCase()); 
 
             if (error) throw error;
-            console.log(`🚀 PAGO RECIBIDO: ${subData.payer_email} renovado hasta ${fechaVencimiento.toLocaleDateString()}`);
+            console.log(`🚀 PREMIUM ACTIVADO: ${subData.payer_email}`);
         }
     } catch (e) { 
         console.error("❌ Error Webhook Suscripción:", e.message); 
     }
 }
-
-    // Siempre respondemos 200 para que Mercado Pago no reintente infinitamente
-    res.sendStatus(200);
-});
 
 // --- GESTIÓN DE TURNOS ---
 app.get("/get-occupied", async (req, res) => {
