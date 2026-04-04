@@ -451,11 +451,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
+    // 1. Check de Caché
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
 
     try {
+        // 2. Obtener datos del usuario en Supabase
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
@@ -464,9 +466,29 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
         if (userError || !user) return res.status(404).json({ error: "Usuario no encontrado" });
 
+        // --- 3. LÓGICA DE CANDADO INTELIGENTE ---
+        if (user.plan === 'premium') {
+            const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+            const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
+
+            // Si es premium pero la fecha venció o no existe, bloqueamos
+            if (!vencimiento || ahoraArg > vencimiento) {
+                return res.status(402).json({ 
+                    error: "Suscripción Premium vencida",
+                    expired: true,
+                    message: "Socio, tu suscripción Premium ha expirado. Renová tu plan para acceder al panel." 
+                });
+            }
+        }
+        // Si el plan es 'gratis', no chequeamos tiempo, pasa directo.
+        // ---------------------------------------
+
+        // 4. Obtener turnos de Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const allRows = response.data.values || [];
+        
+        // Filtramos turnos que pertenezcan a este slug
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
@@ -480,19 +502,31 @@ app.get("/admin-stats/:slug", async (req, res) => {
             if (i === 0 || !r[2]) return;
             const partes = r[2].toString().split(" - ");
             if (partes.length < 2) return;
+            
             const [dia, mes] = partes[0].split("/").map(Number);
+            
             if (mes === mesActual) {
                 turnosMesActual++;
                 if (dia === diaHoyNum) turnosHoy++;
+                
+                // Agrupar para el gráfico
                 if (dia <= 7) semanas["Sem 1"]++;
                 else if (dia <= 14) semanas["Sem 2"]++;
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
-            turnosLista.push({ nombre: r[0], telefono: r[1], fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, hora: partes[1], rawTurno: r[2] });
+
+            turnosLista.push({ 
+                nombre: r[0], 
+                telefono: r[1], 
+                fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, 
+                hora: partes[1], 
+                rawTurno: r[2] 
+            });
         });
 
-const finalData = {
+        // 5. Construcción de respuesta final
+        const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona,
                 turnosHoy, 
@@ -503,7 +537,6 @@ const finalData = {
                 businessName: user.business_name,
                 tokens: user.tokens,
                 horarios: user.horarios,
-                // AQUÍ ESTÁ EL CAMBIO CRUCIAL:
                 config: { 
                     duracion: user.duracion_turno, 
                     precio: user.precio, 
@@ -511,18 +544,22 @@ const finalData = {
                     metodo_pago: user.metodo_pago || 'none',
                     mp_status: user.mp_access_token ? "Conectado" : "Desconectado", 
                     plan: user.plan,
-                    // Agregamos las excepciones aquí dentro para que el Front las vea
+                    vencimiento: user.subscription_expiry, // Enviamos la fecha para que el Front la muestre
                     excepciones: user.excepciones || [] 
                 },
                 turnosLista: turnosLista.reverse()
             }
         };
 
+        // 6. Guardar en caché y responder
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
+    } catch (e) { 
+        console.error("Error en admin-stats:", e.message);
+        res.status(500).json({ error: e.message }); 
+    }
+});
 app.post("/update-settings", async (req, res) => {
     try {
         const { slug, precio, horarios, duracion_turno, ocupados, monto_sena, cobrar_total_activado, metodo_pago } = req.body;
