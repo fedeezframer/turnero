@@ -285,32 +285,77 @@ app.post("/create-booking", async (req, res) => {
         const { name, phone, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
-        const { data: user } = await supabase.from('usuarios').select('plan, tokens').eq('slug', slug).single();
-        if (user && user.plan === 'gratis' && user.tokens <= 0) {
-            return res.status(403).json({ success: false, error: "Sin tokens disponibles." });
+        // 1. Obtener datos completos del usuario (incluyendo plan y vencimiento)
+        const { data: user, error: userError } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('slug', slug)
+            .single();
+
+        if (userError || !user) {
+            return res.status(404).json({ success: false, error: "Negocio no encontrado." });
         }
 
+        // --- 2. LÓGICA DE CANDADO PARA PREMIUM ---
+        if (user.plan === 'premium') {
+            const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+            const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
+
+            // Si es premium pero venció o no tiene fecha, bloqueamos la reserva
+            if (!vencimiento || ahoraArg > vencimiento) {
+                return res.status(403).json({ 
+                    success: false, 
+                    error: "Servicio suspendido temporalmente por el administrador." 
+                });
+            }
+        }
+
+        // --- 3. LÓGICA DE TOKENS PARA GRATIS ---
+        if (user.plan === 'gratis' && user.tokens <= 0) {
+            return res.status(403).json({ success: false, error: "Sin tokens disponibles en este negocio." });
+        }
+
+        // 4. Conectar con Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
         const rows = response.data.values || [];
 
+        // 5. Evitar duplicados (un turno por teléfono por negocio)
         if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
-            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado." });
+            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado en este negocio." });
         }
 
-        const partes = fecha.split("-");
+        // 6. Formatear datos para el append
+        const partes = fecha.split("-"); // Asumiendo YYYY-MM-DD
         const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
+        // 7. Guardar en Google Sheets
         await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID, range: "A:E", valueInputOption: "RAW",
-            requestBody: { values: [[name.trim(), phone.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E",
+            valueInputOption: "RAW",
+            requestBody: { 
+                values: [[
+                    name.trim(), 
+                    phone.toString().trim(), 
+                    textoTurnoNuevo, 
+                    fechaHoyReal, 
+                    slug
+                ]] 
+            }
         });
 
+        // 8. Descontar token si corresponde y limpiar caché
         await handleTokenDiscount(slug);
         delete globalCache[slug];
+
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+    } catch (e) { 
+        console.error("Error en create-booking:", e.message);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 // --- REGISTRO Y AUTH ---
