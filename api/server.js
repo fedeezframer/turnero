@@ -87,8 +87,6 @@ app.post("/api/create-preference", async (req, res) => {
         const { name, phone, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
-        console.log(`Intentando crear preferencia para: ${cleanSlug}`);
-
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
@@ -99,10 +97,22 @@ app.post("/api/create-preference", async (req, res) => {
             return res.status(404).json({ error: "Negocio no encontrado." });
         }
 
+        // --- BLOQUEO POR VENCIMIENTO PREMIUM ---
+        if (user.plan === 'premium') {
+            const ahora = new Date();
+            const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
+            if (!vencimiento || ahora > vencimiento) {
+                return res.status(403).json({ 
+                    error: "Servicio suspendido", 
+                    message: "Este negocio tiene las reservas pausadas temporalmente." 
+                });
+            }
+        }
+        // ---------------------------------------
+
         let precioReal = 0;
         let conceptoPago = "Total";
 
-        // Lógica de precio basada en la nueva columna metodo_pago
         if (user.metodo_pago === 'sena') {
             precioReal = Number(user.monto_sena) || 0;
             conceptoPago = "Seña";
