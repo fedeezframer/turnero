@@ -235,36 +235,34 @@ app.post("/webhook", async (req, res) => {
     }
 
     // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus ingresos de NEGOSOCIO) ---
-    if (body.type === "subscription_preapproval") {
-        try {
-            const subId = body.data.id;
-            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
-                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
-            });
-            const subData = await response.json();
+   if (body.type === "subscription_preapproval" || body.action === "created") {
+    try {
+        const subId = body.data ? body.data.id : body.id; // Doble check de ID
+        const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+        });
+        const subData = await response.json();
 
-            // Si el estado es "authorized" significa que el primer pago o la suscripción está activa
-            if (subData.status === "authorized") {
-                // Calculamos 30 días exactos desde hoy para el vencimiento
-                const fechaVencimiento = new Date();
-                fechaVencimiento.setDate(fechaVencimiento.getDate() + 30);
+        if (subData.status === "authorized") {
+            const fechaVencimiento = new Date();
+            fechaVencimiento.setMonth(fechaVencimiento.getMonth() + 1); // +1 Mes exacto
 
-                const { error } = await supabase
-                    .from('usuarios')
-                    .update({ 
-                        plan: 'premium', 
-                        tokens: 100000,
-                        subscription_expiry: fechaVencimiento.toISOString() // Formato timestamptz para Supabase
-                    })
-                    .eq('email', subData.payer_email); // Buscamos por el mail de quien pagó
+            const { error } = await supabase
+                .from('usuarios')
+                .update({ 
+                    plan: 'premium', 
+                    tokens: 100000,
+                    subscription_expiry: fechaVencimiento.toISOString()
+                })
+                .eq('email', subData.payer_email);
 
-                if (error) throw error;
-                console.log(`🚀 SOCIO AL DÍA: ${subData.payer_email} ahora es Premium hasta ${fechaVencimiento.toLocaleDateString('es-AR')}`);
-            }
-        } catch (e) { 
-            console.error("❌ Error Webhook Suscripción (Socio):", e.message); 
+            if (error) throw error;
+            console.log(`🚀 PAGO RECIBIDO: ${subData.payer_email} renovado hasta ${fechaVencimiento.toLocaleDateString()}`);
         }
+    } catch (e) { 
+        console.error("❌ Error Webhook Suscripción:", e.message); 
     }
+}
 
     // Siempre respondemos 200 para que Mercado Pago no reintente infinitamente
     res.sendStatus(200);
