@@ -197,7 +197,7 @@ app.get("/oauth-callback", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
 
-    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Reserva individual de clientes de tus socios) ---
+    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Clientes finales reservando con socios) ---
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data?.id;
         if (!paymentId) return res.sendStatus(200);
@@ -209,14 +209,17 @@ app.post("/webhook", async (req, res) => {
             const paymentData = await paymentResponse.json();
 
             if (paymentData.status === "approved") {
+                // Los metadatos vienen del checkout que configuraste en el frontend
                 const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
                 
                 const partes = fecha.split("-");
                 const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
+                // Fecha de creación del registro en formato local
                 const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                 const sheets = await getSheets();
                 
+                // 1.1. Agendar en la Google Sheet Master
                 await sheets.spreadsheets.values.append({
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
@@ -232,16 +235,19 @@ app.post("/webhook", async (req, res) => {
                     }
                 });
 
+                // 1.2. Descontar token del socio y limpiar caché para que vea el cambio real
                 await handleTokenDiscount(slug);
                 delete globalCache[slug];
-                console.log(`✅ Turno agendado para el socio: ${slug}`);
+                
+                console.log(`✅ Turno aprobado y agendado para el socio: ${slug}`);
             }
         } catch (e) { 
-            console.error("❌ Error Webhook Payment:", e.message); 
+            console.error("❌ Error en Webhook de Pagos (Turnos):", e.message); 
         }
     }
 
     // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus socios pagándote a vos) ---
+    // Mercado Pago envía 'subscription_preapproval' para suscripciones automáticas
     if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
         try {
             const subId = body.data?.id || body.id; 
@@ -252,16 +258,16 @@ app.post("/webhook", async (req, res) => {
             });
             const subData = await response.json();
 
-            // "authorized" o "active" significa que el pago está confirmado
+            // "authorized" o "active" significa que el cobro fue exitoso
             if (subData.status === "authorized" || subData.status === "active") {
                 const userEmail = subData.payer_email.trim().toLowerCase();
                 
-                // Calculamos vencimiento (1 mes desde hoy + 2 días de gracia por las dudas)
+                // Calculamos vencimiento: 1 mes + 2 días de gracia
                 const nuevaFechaVencimiento = new Date();
                 nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
                 nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-                // Intentamos actualizar al usuario si ya existe en la base de datos
+                // Intentamos actualizar al socio si ya existe
                 const { data: userUpdated, error: updateError } = await supabase
                     .from('usuarios')
                     .update({ 
@@ -272,46 +278,47 @@ app.post("/webhook", async (req, res) => {
                     .eq('email', userEmail)
                     .select();
 
-                // Si no existe (el usuario pagó sin completar el registro o falló antes), lo CREAMOS de una
+                // 2.1. AUTO-REGISTRO: Si el socio pagó pero no estaba en la DB todavía
                 if (!userUpdated || userUpdated.length === 0) {
-                    console.log(`🆕 Usuario nuevo detectado vía Suscripción: ${userEmail}`);
+                    console.log(`🆕 Socio nuevo detectado vía suscripción: ${userEmail}`);
                     
-                    // Generamos un slug limpio basado en el email
+                    // Generamos un slug temporal basado en la primera parte del email
                     const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                     
                     const { error: insertError } = await supabase.from('usuarios').insert([{
                         email: userEmail,
-                        slug: tempSlug,
-                        business_name: "Mi Negocio", // Nombre genérico que podrá cambiar en ajustes
+                        slug: tempSlug + "-" + Math.floor(Math.random() * 1000), // Evitamos colisiones de slug
+                        business_name: "Mi Nuevo Negocio",
                         nombre_persona: "Socio",
-                        password: "negosocio-auto", // Contraseña temporal por defecto
+                        password: "cambiame-al-entrar", // Password por defecto
                         plan: 'premium',
                         tokens: 100000,
                         sheet_id: MASTER_SHEET_ID,
                         subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                        horarios: {}, // Estructura vacía, la configurará en su dashboard
+                        horarios: {}, 
                         excepciones: [],
                         metodo_pago: 'none',
-                        telefono: null
+                        telefono: null,
+                        mp_access_token: null
                     }]);
 
                     if (insertError) {
-                        console.error("❌ Error al crear usuario automático:", insertError.message);
+                        console.error("❌ Error al crear socio automático:", insertError.message);
                     } else {
                         console.log(`🚀 CUENTA CREADA AUTOMÁTICAMENTE PARA: ${userEmail}`);
                     }
                 } else {
-                    // Si ya existía, solo limpiamos su caché para que el Dashboard se actualice
-                    console.log(`🚀 PREMIUM ACTUALIZADO/RENOVADO: ${userEmail}`);
+                    // Si ya existía, limpiamos su caché para que el Dashboard refleje el estado Premium
+                    console.log(`🚀 PREMIUM RENOVADO/ACTIVADO PARA: ${userEmail}`);
                     delete globalCache[userUpdated[0].slug];
                 }
             }
         } catch (e) { 
-            console.error("❌ Error Webhook Suscripción:", e.message); 
+            console.error("❌ Error en Webhook de Suscripciones:", e.message); 
         }
     }
 
-    // Siempre respondemos 200 a Mercado Pago para confirmar recepción del aviso
+    // Siempre respondemos 200 a Mercado Pago para evitar que reintente el envío
     res.sendStatus(200);
 });
 
@@ -320,14 +327,16 @@ app.post("/api/create-subscription", async (req, res) => {
         const { email } = req.body;
 
         if (!email) {
-            return res.status(400).json({ error: "El email es obligatorio" });
+            return res.status(400).json({ error: "El email es obligatorio para generar la suscripción." });
         }
 
-        // 1. Generamos el slug a partir del email para el redireccionamiento posterior
+        // 1. Generamos el slug a partir del email para la redirección inicial
+        // Esto sirve para que el socio vuelva a su dashboard "provisorio" mientras el webhook procesa todo.
         const userSlug = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        // 2. Llamada a la API de Mercado Pago para crear el Plan de suscripción dinámico
-        const response = await fetch("https://api.mercadopago.com/preapproval_plan", {
+        // 2. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
+        // Usamos /preapproval para suscripciones recurrentes directas.
+        const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
@@ -335,42 +344,50 @@ app.post("/api/create-subscription", async (req, res) => {
             },
             body: JSON.stringify({
                 reason: "Plan Premium NegoSocio",
+                payer_email: email.toLowerCase().trim(),
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15,
+                    transaction_amount: 15, // Asegurate de que este sea el monto correcto en ARS
                     currency_id: "ARS"
                 },
-                // Al terminar el pago, lo mandamos directo a su dashboard con su slug
+                // URL a la que vuelve el socio después de tocar "Finalizar" en el checkout de MP
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}`,
-                payer_email: email.toLowerCase().trim(), // Pre-completa el email en el checkout
-                status: "active"
+                status: "pending"
             })
         });
 
-        const plan = await response.json();
+        const subscription = await response.json();
 
-        // Si Mercado Pago devuelve un error (por ejemplo, token inválido o datos mal formados)
+        // Manejo de errores de la API de Mercado Pago
         if (!response.ok) {
-            console.error("❌ Error de MP al crear plan:", plan);
-            return res.status(response.status).json({ error: plan.message || "Error al crear plan en MP" });
+            console.error("❌ Error de MP al generar suscripción:", subscription);
+            return res.status(response.status).json({ 
+                error: subscription.message || "No se pudo conectar con Mercado Pago. Reintentá." 
+            });
         }
 
-        // 3. Obtenemos el link de pago (priorizamos init_point de producción)
-        const checkoutUrl = plan.init_point || plan.sandbox_init_point;
+        // 3. Obtenemos el link de pago (init_point es para producción, sandbox para pruebas)
+        // Mercado Pago suele devolver init_point para suscripciones también.
+        const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
-            throw new Error("No se pudo obtener la URL de checkout");
+            console.error("❌ No se encontró init_point en la respuesta:", subscription);
+            throw new Error("No se pudo obtener la URL de pago de la respuesta de Mercado Pago.");
         }
 
-        console.log(`🔗 Link de suscripción generado para: ${email}`);
+        console.log(`🔗 Link de suscripción Premium generado para el socio: ${email}`);
         
-        // Devolvemos el link a Framer
-        res.json({ init_point: checkoutUrl }); 
+        // Enviamos la URL a Framer para que haga el window.location.href
+        res.json({ 
+            success: true,
+            init_point: checkoutUrl,
+            message: "Link de suscripción generado correctamente."
+        }); 
 
     } catch (e) {
         console.error("❌ Error crítico creando suscripción:", e.message);
-        res.status(500).json({ error: "Error interno del servidor" });
+        res.status(500).json({ error: "Hubo un error interno al procesar la suscripción. Intentá más tarde." });
     }
 });
     
@@ -522,19 +539,21 @@ app.post("/api/verify-and-register", async (req, res) => {
             let fechaVencimientoInicial = null;
             
             if (isPremium) {
-                // Le damos 2 horas de gracia inicial para que el Webhook tenga tiempo de procesar el pago real
+                // Le damos 24 horas de gracia inicial. 
+                // Esto permite que el usuario entre al dashboard aunque el Webhook de MP no haya impactado todavía.
                 const ahora = new Date();
-                ahora.setHours(ahora.getHours() + 2); 
+                ahora.setHours(ahora.getHours() + 24); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
 
             // 4. Insertar en la tabla de Usuarios de Supabase
+            // Usamos un objeto de configuración completo para evitar que falten datos por defecto
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
                 nombre_persona: nombre_persona || "Dueño",
                 business_name: finalName,
-                password: String(result.password), // Viene del script de Google
+                password: String(result.password), // Contraseña que viene del proceso de verificación
                 sheet_id: MASTER_SHEET_ID,
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
@@ -542,21 +561,22 @@ app.post("/api/verify-and-register", async (req, res) => {
                 plan: isPremium ? 'premium' : 'gratis',
                 tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
-                metodo_pago: 'none', // Se actualiza luego cuando conecte MP
+                metodo_pago: 'none', // Se inicializa en none hasta que vinculen MP
                 subscription_expiry: fechaVencimientoInicial,
-                excepciones: [] // Array vacío por defecto
+                excepciones: [],
+                mp_access_token: null // Aseguramos que arranque limpio
             }]);
 
             if (error) {
-                // Si el error es por slug duplicado, avisamos
+                // Manejo específico para nombres de negocio duplicados (Primary Key / Unique constraint en slug)
                 if (error.code === '23505') {
-                    return res.status(400).json({ error: "Este nombre de negocio ya está registrado." });
+                    return res.status(400).json({ error: "Este nombre de negocio ya está registrado. Probá con uno similar." });
                 }
                 throw error;
             }
 
-            // 5. Respuesta exitosa (el slug es vital para la redirección en Framer)
-            console.log(`✨ Nuevo usuario registrado: ${cleanSlug} (${plan})`);
+            // 5. Respuesta exitosa
+            console.log(`✨ Nuevo usuario registrado exitosamente: ${cleanSlug} (Plan: ${plan})`);
             res.json({ 
                 success: true, 
                 slug: cleanSlug,
@@ -564,12 +584,12 @@ app.post("/api/verify-and-register", async (req, res) => {
             });
 
         } else {
-            // El código no coincide o expiró en la planilla
-            res.status(400).json({ error: "El código de verificación no es válido o ya expiró." });
+            // El código no coincide o expiró en el flujo de Google Sheets
+            res.status(400).json({ error: "El código de verificación no es válido o ya expiró. Solicitá uno nuevo." });
         }
     } catch (e) { 
-        console.error("❌ Error crítico en registro:", e.message);
-        res.status(500).json({ error: "Hubo un problema al crear tu cuenta. Intentá de nuevo." }); 
+        console.error("❌ Error crítico en el proceso de registro:", e.message);
+        res.status(500).json({ error: "Hubo un problema al crear tu cuenta. Por favor, intentá de nuevo en unos minutos." }); 
     }
 });
 
