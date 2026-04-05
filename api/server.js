@@ -233,52 +233,67 @@ app.post("/webhook", async (req, res) => {
         }
     }
 
-    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Débito automático mensual) ---
-    // Escuchamos 'subscription_preapproval' (creación) y 'subscription_authorized' (pagos mensuales)
-    if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
-        try {
-            const subId = body.data?.id || body.id; 
+if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
+    try {
+        const subId = body.data?.id || body.id; 
+        if (!subId) return res.sendStatus(200);
+
+        const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+        });
+        const subData = await response.json();
+
+        if (subData.status === "authorized" || subData.status === "active") {
+            const userEmail = subData.payer_email.trim().toLowerCase();
             
-            if (!subId) return res.sendStatus(200);
+            // Calculamos vencimiento (1 mes + 2 días gracia)
+            const nuevaFechaVencimiento = new Date();
+            nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
+            nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
-                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
-            });
-            const subData = await response.json();
+            // 1. Intentamos actualizar si ya existe
+            const { data: userUpdated, error: updateError } = await supabase
+                .from('usuarios')
+                .update({ 
+                    plan: 'premium', 
+                    tokens: 100000, 
+                    subscription_expiry: nuevaFechaVencimiento.toISOString() 
+                })
+                .eq('email', userEmail)
+                .select();
 
-            // "authorized" o "active" significa que el pago está ok
-            if (subData.status === "authorized" || subData.status === "active") {
-                const userEmail = subData.payer_email.trim().toLowerCase();
-
-                // Calculamos el nuevo vencimiento: Hoy + 1 mes + 2 días de gracia
-                const nuevaFechaVencimiento = new Date();
-                nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
-                nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
-
-                const { data: userUpdated, error } = await supabase
-                    .from('usuarios')
-                    .update({ 
-                        plan: 'premium', 
-                        tokens: 100000, // Reset de tokens premium
-                        subscription_expiry: nuevaFechaVencimiento.toISOString()
-                    })
-                    .eq('email', userEmail)
-                    .select();
-
-                if (error) throw error;
+            // 2. Si no existe (userUpdated vacío), lo CREAMOS de una
+            if (!userUpdated || userUpdated.length === 0) {
+                console.log(`🆕 Usuario nuevo detectado vía Suscripción: ${userEmail}`);
                 
-                if (userUpdated && userUpdated.length > 0) {
-                    console.log(`🚀 PREMIUM ACTUALIZADO: ${userEmail} hasta ${nuevaFechaVencimiento.toLocaleDateString()}`);
-                    // Limpiamos caché del usuario para que vea los cambios al instante
-                    delete globalCache[userUpdated[0].slug];
-                } else {
-                    console.log(`⚠️ Pago recibido de ${userEmail} pero no existe en Supabase.`);
-                }
+                // Generamos un slug y password temporal (el usuario podrá cambiarlo después o usar el de su registro fallido)
+                const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                
+                await supabase.from('usuarios').insert([{
+                    email: userEmail,
+                    slug: tempSlug,
+                    business_name: "Mi Negocio", // Placeholder
+                    nombre_persona: "Socio",
+                    password: "negosocio-auto", // Password por defecto o podrías mandárselo por mail
+                    plan: 'premium',
+                    tokens: 100000,
+                    sheet_id: MASTER_SHEET_ID,
+                    subscription_expiry: nuevaFechaVencimiento.toISOString(),
+                    horarios: {},
+                    excepciones: [],
+                    metodo_pago: 'none'
+                }]);
+                
+                console.log(`🚀 CUENTA CREADA AUTOMÁTICAMENTE: ${userEmail}`);
+            } else {
+                console.log(`🚀 PREMIUM RENOVADO: ${userEmail}`);
+                delete globalCache[userUpdated[0].slug];
             }
-        } catch (e) { 
-            console.error("❌ Error Webhook Suscripción:", e.message); 
         }
+    } catch (e) { 
+        console.error("❌ Error Webhook Suscripción:", e.message); 
     }
+}
 
     res.sendStatus(200); // Siempre respondemos 200 a MP para que no reintente
 });
