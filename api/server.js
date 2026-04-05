@@ -318,15 +318,19 @@ app.post("/webhook", async (req, res) => {
 app.post("/api/create-subscription", async (req, res) => {
     try {
         const { email } = req.body;
-        
-        // 1. Generamos el slug a partir del email (la misma lógica que usás en el registro)
-        // Si ya tenés el slug guardado en la base de datos, podrías buscarlo ahí también.
+
+        if (!email) {
+            return res.status(400).json({ error: "El email es obligatorio" });
+        }
+
+        // 1. Generamos el slug a partir del email para el redireccionamiento posterior
         const userSlug = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
+        // 2. Llamada a la API de Mercado Pago para crear el Plan de suscripción dinámico
         const response = await fetch("https://api.mercadopago.com/preapproval_plan", {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`, // Tu token de desarrollador
+                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
@@ -337,22 +341,36 @@ app.post("/api/create-subscription", async (req, res) => {
                     transaction_amount: 5000,
                     currency_id: "ARS"
                 },
-                // Cambiamos 'verificar-cuenta?email=' por el dashboard con el parámetro 'u'
+                // Al terminar el pago, lo mandamos directo a su dashboard con su slug
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}`,
+                payer_email: email.toLowerCase().trim(), // Pre-completa el email en el checkout
                 status: "active"
             })
         });
 
         const plan = await response.json();
 
-        // Mercado Pago devuelve 'init_point' para producción y 'sandbox_init_point' para pruebas
+        // Si Mercado Pago devuelve un error (por ejemplo, token inválido o datos mal formados)
+        if (!response.ok) {
+            console.error("❌ Error de MP al crear plan:", plan);
+            return res.status(response.status).json({ error: plan.message || "Error al crear plan en MP" });
+        }
+
+        // 3. Obtenemos el link de pago (priorizamos init_point de producción)
         const checkoutUrl = plan.init_point || plan.sandbox_init_point;
 
+        if (!checkoutUrl) {
+            throw new Error("No se pudo obtener la URL de checkout");
+        }
+
+        console.log(`🔗 Link de suscripción generado para: ${email}`);
+        
+        // Devolvemos el link a Framer
         res.json({ init_point: checkoutUrl }); 
 
     } catch (e) {
-        console.error("Error creando suscripción:", e.message);
-        res.status(500).json({ error: e.message });
+        console.error("❌ Error crítico creando suscripción:", e.message);
+        res.status(500).json({ error: "Error interno del servidor" });
     }
 });
     
