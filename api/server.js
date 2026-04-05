@@ -418,8 +418,19 @@ app.post("/api/request-verification", async (req, res) => {
 
 app.post("/api/verify-and-register", async (req, res) => {
     try {
-        const { email, code, business_name, nombre_persona, precio, duracion_turno, plan, horarios, telefono } = req.body;
+        const { 
+            email, 
+            code, 
+            business_name, 
+            nombre_persona, 
+            precio, 
+            duracion_turno, 
+            plan, 
+            horarios, 
+            telefono 
+        } = req.body;
         
+        // 1. Validar el código con Google Apps Script
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
@@ -429,28 +440,38 @@ app.post("/api/verify-and-register", async (req, res) => {
                 code: code.toString().trim() 
             })
         });
+        
         const result = await googleRes.json();
 
         if (result.status === "valid") {
+            // 2. Generar Slug limpio a partir del nombre del negocio
             const finalName = business_name || result.usuario || "Negocio";
-            const cleanSlug = finalName.toLowerCase().trim()
-                .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-                .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            const cleanSlug = finalName
+                .toLowerCase()
+                .trim()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "") // Quita acentos
+                .replace(/\s+/g, '-')           // Espacios por guiones
+                .replace(/[^a-z0-9-]/g, '');    // Quita caracteres raros
             
+            // 3. Lógica de Plan y Vencimiento Inicial
             const isPremium = plan === 'premium';
             let fechaVencimientoInicial = null;
+            
             if (isPremium) {
+                // Le damos 2 horas de gracia inicial para que el Webhook tenga tiempo de procesar el pago real
                 const ahora = new Date();
-                ahora.setHours(ahora.getHours() + 1); 
+                ahora.setHours(ahora.getHours() + 2); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
 
+            // 4. Insertar en la tabla de Usuarios de Supabase
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
-                nombre_persona: nombre_persona,
+                nombre_persona: nombre_persona || "Dueño",
                 business_name: finalName,
-                password: String(result.password),
+                password: String(result.password), // Viene del script de Google
                 sheet_id: MASTER_SHEET_ID,
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
@@ -458,18 +479,34 @@ app.post("/api/verify-and-register", async (req, res) => {
                 plan: isPremium ? 'premium' : 'gratis',
                 tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
-                metodo_pago: 'none',
-                subscription_expiry: fechaVencimientoInicial
+                metodo_pago: 'none', // Se actualiza luego cuando conecte MP
+                subscription_expiry: fechaVencimientoInicial,
+                excepciones: [] // Array vacío por defecto
             }]);
 
-            if (error) throw error;
-            res.json({ success: true, slug: cleanSlug });
+            if (error) {
+                // Si el error es por slug duplicado, avisamos
+                if (error.code === '23505') {
+                    return res.status(400).json({ error: "Este nombre de negocio ya está registrado." });
+                }
+                throw error;
+            }
+
+            // 5. Respuesta exitosa (el slug es vital para la redirección en Framer)
+            console.log(`✨ Nuevo usuario registrado: ${cleanSlug} (${plan})`);
+            res.json({ 
+                success: true, 
+                slug: cleanSlug,
+                message: "Cuenta verificada y creada con éxito."
+            });
+
         } else {
-            res.status(400).json({ error: "Código incorrecto" });
+            // El código no coincide o expiró en la planilla
+            res.status(400).json({ error: "El código de verificación no es válido o ya expiró." });
         }
     } catch (e) { 
-        console.error("Error en registro:", e.message);
-        res.status(500).json({ error: e.message }); 
+        console.error("❌ Error crítico en registro:", e.message);
+        res.status(500).json({ error: "Hubo un problema al crear tu cuenta. Intentá de nuevo." }); 
     }
 });
 
