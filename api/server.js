@@ -196,8 +196,8 @@ app.get("/oauth-callback", async (req, res) => {
 // --- WEBHOOK UNIFICADO ---
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
-    
-    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Reserva individual) ---
+
+    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Reserva individual de clientes de tus socios) ---
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data?.id;
         if (!paymentId) return res.sendStatus(200);
@@ -221,7 +221,15 @@ app.post("/webhook", async (req, res) => {
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
                     valueInputOption: "RAW",
-                    requestBody: { values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
+                    requestBody: { 
+                        values: [[
+                            nombre.trim(), 
+                            telefono.toString().trim(), 
+                            textoTurnoNuevo, 
+                            fechaHoyReal, 
+                            slug
+                        ]] 
+                    }
                 });
 
                 await handleTokenDiscount(slug);
@@ -233,69 +241,78 @@ app.post("/webhook", async (req, res) => {
         }
     }
 
-if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
-    try {
-        const subId = body.data?.id || body.id; 
-        if (!subId) return res.sendStatus(200);
+    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus socios pagándote a vos) ---
+    if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
+        try {
+            const subId = body.data?.id || body.id; 
+            if (!subId) return res.sendStatus(200);
 
-        const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
-            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
-        });
-        const subData = await response.json();
+            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            });
+            const subData = await response.json();
 
-        if (subData.status === "authorized" || subData.status === "active") {
-            const userEmail = subData.payer_email.trim().toLowerCase();
-            
-            // Calculamos vencimiento (1 mes + 2 días gracia)
-            const nuevaFechaVencimiento = new Date();
-            nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
-            nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
-
-            // 1. Intentamos actualizar si ya existe
-            const { data: userUpdated, error: updateError } = await supabase
-                .from('usuarios')
-                .update({ 
-                    plan: 'premium', 
-                    tokens: 100000, 
-                    subscription_expiry: nuevaFechaVencimiento.toISOString() 
-                })
-                .eq('email', userEmail)
-                .select();
-
-            // 2. Si no existe (userUpdated vacío), lo CREAMOS de una
-            if (!userUpdated || userUpdated.length === 0) {
-                console.log(`🆕 Usuario nuevo detectado vía Suscripción: ${userEmail}`);
+            // "authorized" o "active" significa que el pago está confirmado
+            if (subData.status === "authorized" || subData.status === "active") {
+                const userEmail = subData.payer_email.trim().toLowerCase();
                 
-                // Generamos un slug y password temporal (el usuario podrá cambiarlo después o usar el de su registro fallido)
-                const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                
-                await supabase.from('usuarios').insert([{
-                    email: userEmail,
-                    slug: tempSlug,
-                    business_name: "Mi Negocio", // Placeholder
-                    nombre_persona: "Socio",
-                    password: "negosocio-auto", // Password por defecto o podrías mandárselo por mail
-                    plan: 'premium',
-                    tokens: 100000,
-                    sheet_id: MASTER_SHEET_ID,
-                    subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                    horarios: {},
-                    excepciones: [],
-                    metodo_pago: 'none'
-                }]);
-                
-                console.log(`🚀 CUENTA CREADA AUTOMÁTICAMENTE: ${userEmail}`);
-            } else {
-                console.log(`🚀 PREMIUM RENOVADO: ${userEmail}`);
-                delete globalCache[userUpdated[0].slug];
+                // Calculamos vencimiento (1 mes desde hoy + 2 días de gracia por las dudas)
+                const nuevaFechaVencimiento = new Date();
+                nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
+                nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
+
+                // Intentamos actualizar al usuario si ya existe en la base de datos
+                const { data: userUpdated, error: updateError } = await supabase
+                    .from('usuarios')
+                    .update({ 
+                        plan: 'premium', 
+                        tokens: 100000, 
+                        subscription_expiry: nuevaFechaVencimiento.toISOString() 
+                    })
+                    .eq('email', userEmail)
+                    .select();
+
+                // Si no existe (el usuario pagó sin completar el registro o falló antes), lo CREAMOS de una
+                if (!userUpdated || userUpdated.length === 0) {
+                    console.log(`🆕 Usuario nuevo detectado vía Suscripción: ${userEmail}`);
+                    
+                    // Generamos un slug limpio basado en el email
+                    const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    
+                    const { error: insertError } = await supabase.from('usuarios').insert([{
+                        email: userEmail,
+                        slug: tempSlug,
+                        business_name: "Mi Negocio", // Nombre genérico que podrá cambiar en ajustes
+                        nombre_persona: "Socio",
+                        password: "negosocio-auto", // Contraseña temporal por defecto
+                        plan: 'premium',
+                        tokens: 100000,
+                        sheet_id: MASTER_SHEET_ID,
+                        subscription_expiry: nuevaFechaVencimiento.toISOString(),
+                        horarios: {}, // Estructura vacía, la configurará en su dashboard
+                        excepciones: [],
+                        metodo_pago: 'none',
+                        telefono: null
+                    }]);
+
+                    if (insertError) {
+                        console.error("❌ Error al crear usuario automático:", insertError.message);
+                    } else {
+                        console.log(`🚀 CUENTA CREADA AUTOMÁTICAMENTE PARA: ${userEmail}`);
+                    }
+                } else {
+                    // Si ya existía, solo limpiamos su caché para que el Dashboard se actualice
+                    console.log(`🚀 PREMIUM ACTUALIZADO/RENOVADO: ${userEmail}`);
+                    delete globalCache[userUpdated[0].slug];
+                }
             }
+        } catch (e) { 
+            console.error("❌ Error Webhook Suscripción:", e.message); 
         }
-    } catch (e) { 
-        console.error("❌ Error Webhook Suscripción:", e.message); 
     }
-}
 
-    res.sendStatus(200); // Siempre respondemos 200 a MP para que no reintente
+    // Siempre respondemos 200 a Mercado Pago para confirmar recepción del aviso
+    res.sendStatus(200);
 });
 
 app.post("/api/create-subscription", async (req, res) => {
