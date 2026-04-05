@@ -545,69 +545,97 @@ app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
+    // 1. Verificación de Caché
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
 
     try {
+        // 2. Obtener datos del usuario en Supabase
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
             .eq('slug', slug)
             .single();
 
-        if (userError || !user) return res.status(404).json({ error: "Usuario no encontrado" });
+        if (userError || !user) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
 
+        // 3. Lógica de Control de Suscripción Premium
+        const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+        
         if (user.plan === 'premium') {
-            const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
 
+            // Si el plan es premium pero no hay fecha o ya pasó, bloqueamos con 402
             if (!vencimiento || ahoraArg > vencimiento) {
                 return res.status(402).json({ 
                     error: "Suscripción Premium vencida",
                     expired: true,
-                    message: "Socio, tu suscripción Premium ha expirado." 
+                    message: "Socio, tu suscripción Premium ha expirado. Por favor, renovala para seguir recibiendo turnos.",
+                    slug: user.slug
                 });
             }
         }
 
+        // 4. Obtener turnos desde Google Sheets
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
+        const response = await sheets.spreadsheets.values.get({ 
+            spreadsheetId: MASTER_SHEET_ID, 
+            range: "A:E" 
+        });
+        
         const allRows = response.data.values || [];
+        // Filtramos las filas: mantenemos el encabezado (i===0) y las que pertenecen a este negocio (slug)
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
-        const ahoraArg = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Argentina/Buenos_Aires"}));
+        // 5. Procesamiento de Estadísticas
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
         
-        let turnosHoy = 0, turnosMesActual = 0, turnosLista = [];
+        let turnosHoy = 0;
+        let turnosMesActual = 0;
+        let turnosLista = [];
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
+            // Saltamos encabezado o filas vacías
             if (i === 0 || !r[2]) return;
+
+            // El formato esperado en la celda es "DD/MM - HH:mm"
             const partes = r[2].toString().split(" - ");
             if (partes.length < 2) return;
             
             const [dia, mes] = partes[0].split("/").map(Number);
             
+            // Si el turno pertenece al mes en curso
             if (mes === mesActual) {
                 turnosMesActual++;
-                if (dia === diaHoyNum) turnosHoy++;
+                
+                // Si es hoy
+                if (dia === diaHoyNum) {
+                    turnosHoy++;
+                }
+
+                // Clasificación por semanas para el gráfico
                 if (dia <= 7) semanas["Sem 1"]++;
                 else if (dia <= 14) semanas["Sem 2"]++;
                 else if (dia <= 21) semanas["Sem 3"]++;
                 else semanas["Sem 4"]++;
             }
 
+            // Construimos el objeto para la lista de turnos del admin
             turnosLista.push({ 
                 nombre: r[0], 
                 telefono: r[1], 
-                fecha: `2026-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`, 
+                fecha: `2026-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
                 hora: partes[1], 
                 rawTurno: r[2] 
             });
         });
 
+        // 6. Estructura final de respuesta
         const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona,
@@ -629,16 +657,18 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     vencimiento: user.subscription_expiry,
                     excepciones: user.excepciones || [] 
                 },
+                // Invertimos la lista para mostrar los más recientes arriba
                 turnosLista: turnosLista.reverse()
             }
         };
 
+        // 7. Guardar en caché y enviar
         globalCache[slug] = { timestamp: now, data: finalData };
         res.json(finalData);
 
     } catch (e) { 
-        console.error("Error en admin-stats:", e.message);
-        res.status(500).json({ error: e.message }); 
+        console.error("❌ Error crítico en admin-stats:", e.message);
+        res.status(500).json({ error: "Error al procesar las estadísticas del negocio." }); 
     }
 });
 
