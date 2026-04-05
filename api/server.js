@@ -197,7 +197,7 @@ app.get("/oauth-callback", async (req, res) => {
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
 
-    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Clientes finales reservando con socios) ---
+    // --- 1. LÓGICA PARA PAGOS DE TURNOS (Venta de socios a sus clientes) ---
     if (query.topic === "payment" || body.type === "payment") {
         const paymentId = query.id || body.data?.id;
         if (!paymentId) return res.sendStatus(200);
@@ -209,42 +209,91 @@ app.post("/webhook", async (req, res) => {
             const paymentData = await paymentResponse.json();
 
             if (paymentData.status === "approved") {
-                // Los metadatos vienen del checkout que configuraste en el frontend
                 const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
                 
                 const partes = fecha.split("-");
                 const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
-                // Fecha de creación del registro en formato local
                 const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                 const sheets = await getSheets();
                 
-                // 1.1. Agendar en la Google Sheet Master
                 await sheets.spreadsheets.values.append({
                     spreadsheetId: MASTER_SHEET_ID,
                     range: "A:E",
                     valueInputOption: "RAW",
                     requestBody: { 
-                        values: [[
-                            nombre.trim(), 
-                            telefono.toString().trim(), 
-                            textoTurnoNuevo, 
-                            fechaHoyReal, 
-                            slug
-                        ]] 
+                        values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] 
                     }
                 });
 
-                // 1.2. Descontar token del socio y limpiar caché para que vea el cambio real
                 await handleTokenDiscount(slug);
-                delete globalCache[slug];
-                
-                console.log(`✅ Turno aprobado y agendado para el socio: ${slug}`);
+                delete globalCache[slug]; // Limpieza de caché para actualización inmediata
+                console.log(`✅ Turno agendado para socio: ${slug}`);
             }
         } catch (e) { 
-            console.error("❌ Error en Webhook de Pagos (Turnos):", e.message); 
+            console.error("❌ Error en Webhook Pagos:", e.message); 
         }
     }
+
+    // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus socios pagándote a vos) ---
+    if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
+        try {
+            const subId = body.data?.id || body.id; 
+            if (!subId) return res.sendStatus(200);
+
+            const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+                headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+            });
+            const subData = await response.json();
+
+            // Verificamos que el estado sea 'authorized' (aprobado) o 'active'
+            if (subData.status === "authorized" || subData.status === "active") {
+                const userEmail = subData.payer_email.trim().toLowerCase();
+                
+                const nuevaFechaVencimiento = new Date();
+                nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
+                nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2); // 2 días de gracia
+
+                // Buscamos y actualizamos por EMAIL
+                const { data: userUpdated, error: updateError } = await supabase
+                    .from('usuarios')
+                    .update({ 
+                        plan: 'premium', 
+                        tokens: 100000, 
+                        subscription_expiry: nuevaFechaVencimiento.toISOString() 
+                    })
+                    .eq('email', userEmail)
+                    .select();
+
+                if (updateError) throw updateError;
+
+                // Si el socio no existía (Auto-registro)
+                if (!userUpdated || userUpdated.length === 0) {
+                    console.log(`🆕 Creando socio nuevo desde pago: ${userEmail}`);
+                    const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase() + "-" + Math.floor(Math.random() * 1000);
+                    
+                    await supabase.from('usuarios').insert([{
+                        email: userEmail,
+                        slug: tempSlug,
+                        business_name: "Mi Nuevo Negocio",
+                        plan: 'premium',
+                        tokens: 100000,
+                        sheet_id: MASTER_SHEET_ID,
+                        subscription_expiry: nuevaFechaVencimiento.toISOString(),
+                        password: "cambiame-al-entrar"
+                    }]);
+                } else {
+                    console.log(`🚀 Premium activado para: ${userEmail}`);
+                    delete globalCache[userUpdated[0].slug];
+                }
+            }
+        } catch (e) { 
+            console.error("❌ Error en Webhook Suscripciones:", e.message); 
+        }
+    }
+
+    res.sendStatus(200);
+});
 
     // --- 2. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Tus socios pagándote a vos) ---
     // Mercado Pago envía 'subscription_preapproval' para suscripciones automáticas
