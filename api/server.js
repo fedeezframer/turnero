@@ -285,10 +285,14 @@ app.post("/api/create-subscription", async (req, res) => {
     try {
         const { email } = req.body;
         
+        // 1. Generamos el slug a partir del email (la misma lógica que usás en el registro)
+        // Si ya tenés el slug guardado en la base de datos, podrías buscarlo ahí también.
+        const userSlug = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
         const response = await fetch("https://api.mercadopago.com/preapproval_plan", {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+                "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`, // Tu token de desarrollador
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
@@ -299,14 +303,21 @@ app.post("/api/create-subscription", async (req, res) => {
                     transaction_amount: 5000,
                     currency_id: "ARS"
                 },
-                back_url: "https://negosocio.framer.website/verificar-cuenta?email=" + email,
+                // Cambiamos 'verificar-cuenta?email=' por el dashboard con el parámetro 'u'
+                back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}`,
                 status: "active"
             })
         });
 
         const plan = await response.json();
-        res.json({ sandbox_init_point: plan.init_point }); 
+
+        // Mercado Pago devuelve 'init_point' para producción y 'sandbox_init_point' para pruebas
+        const checkoutUrl = plan.init_point || plan.sandbox_init_point;
+
+        res.json({ init_point: checkoutUrl }); 
+
     } catch (e) {
+        console.error("Error creando suscripción:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
