@@ -595,14 +595,38 @@ app.post("/api/verify-and-register", async (req, res) => {
 
 app.post("/login", async (req, res) => {
     try {
+        // 1. Log para ver qué está llegando realmente
+        console.log("Login attempt:", req.body);
+
         const slug = getCleanSlug(req.body.slug);
         const { password } = req.body;
-        const { data: user } = await supabase.from('usuarios').select('*').eq('slug', slug).single();
-        if (user && String(user.password) === String(password)) return res.json({ success: true, slug: user.slug });
-        res.status(401).json({ success: false, error: "Credenciales inválidas" });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
+        const { data: user, error } = await supabase
+            .from('usuarios')
+            .select('*')
+            .eq('slug', slug)
+            .single();
+
+        if (error || !user) {
+            console.log("Usuario no encontrado:", slug);
+            return res.status(401).json({ success: false, error: "Usuario no encontrado" });
+        }
+
+        // Usamos String() para evitar problemas si la pass es numérica en la DB
+        if (String(user.password) === String(password)) {
+            return res.json({ 
+                success: true, 
+                slug: user.slug,
+                // Opcional: podrías devolver un token de sesión aquí
+            });
+        }
+
+        res.status(401).json({ success: false, error: "Contraseña incorrecta" });
+    } catch (e) { 
+        console.error("Error en login:", e.message);
+        res.status(500).json({ error: e.message }); 
+    }
+});
 app.post("/api/request-password-reset", async (req, res) => {
     try {
         const { email, newPassword } = req.body;
