@@ -783,8 +783,25 @@ app.post("/cancel-appointment", async (req, res) => {
 app.get("/verify-session", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.u);
-        const { data: user } = await supabase.from('usuarios').select('slug').eq('slug', slug).single();
-        res.json({ active: !!user });
+        const verificationToken = req.query.v; // Capturamos el token 'v'
+
+        const { data: user } = await supabase
+            .from('usuarios')
+            .select('slug, plan, subscription_expiry')
+            .eq('slug', slug)
+            .single();
+
+        if (!user) return res.json({ active: false });
+
+        // Si es premium, chequeamos que no esté vencido
+        if (user.plan === 'premium') {
+            const ahora = new Date();
+            const vencimiento = new Date(user.subscription_expiry);
+            if (ahora > vencimiento) return res.json({ active: false, reason: "expired" });
+        }
+
+
+        res.json({ active: true });
     } catch (e) { 
         res.json({ active: false }); 
     }
