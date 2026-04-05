@@ -878,28 +878,73 @@ app.post("/cancel-appointment", async (req, res) => {
 
 app.get("/verify-session", async (req, res) => {
     try {
-        const slug = getCleanSlug(req.query.u);
-        const verificationToken = req.query.v; // Capturamos el token 'v'
+        const rawU = req.query.u;
+        const verificationToken = req.query.v; // Capturamos el token 'v' por si lo necesitas luego
 
-        const { data: user } = await supabase
+        if (!rawU) {
+            console.log("⚠️ Intento de verificación sin parámetro 'u'");
+            return res.json({ active: false, reason: "no_slug" });
+        }
+
+        // Limpiamos el slug con la misma función que usas en el registro/login
+        const slug = getCleanSlug(rawU);
+        
+        console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
+
+        const { data: user, error } = await supabase
             .from('usuarios')
             .select('slug, plan, subscription_expiry')
             .eq('slug', slug)
             .single();
 
-        if (!user) return res.json({ active: false });
-
-        // Si es premium, chequeamos que no esté vencido
-        if (user.plan === 'premium') {
-            const ahora = new Date();
-            const vencimiento = new Date(user.subscription_expiry);
-            if (ahora > vencimiento) return res.json({ active: false, reason: "expired" });
+        // Si hay error en Supabase o el usuario no existe
+        if (error || !user) {
+            console.log(`❌ Usuario no encontrado en DB: ${slug}`);
+            return res.json({ 
+                active: false, 
+                reason: "user_not_found",
+                debug: error ? error.message : "Not found" 
+            });
         }
 
+        // --- LÓGICA DE SUSCRIPCIÓN ---
+        if (user.plan === 'premium') {
+            if (!user.subscription_expiry) {
+                console.log(`⚠️ Usuario ${slug} es premium pero no tiene fecha de vencimiento.`);
+                // Por seguridad, si no tiene fecha pero es premium, lo dejamos pasar 
+                // o puedes marcarlo como expirado según prefieras.
+            } else {
+                const ahora = new Date();
+                const vencimiento = new Date(user.subscription_expiry);
 
-        res.json({ active: true });
+                if (ahora > vencimiento) {
+                    console.log(`🚫 Suscripción vencida para ${slug}. Venció el: ${vencimiento}`);
+                    // Devolvemos 402 para que el ProtectedRoute de Framer sepa que debe ir a /renovar
+                    return res.status(402).json({ 
+                        active: false, 
+                        reason: "expired",
+                        expiry: user.subscription_expiry 
+                    });
+                }
+            }
+        }
+
+        // --- TODO OK ---
+        console.log(`✅ Sesión confirmada para: ${slug}`);
+        res.json({ 
+            active: true, 
+            slug: user.slug, 
+            plan: user.plan 
+        });
+
     } catch (e) { 
-        res.json({ active: false }); 
+        console.error("🔥 Error crítico en verify-session:", e.message);
+        // Enviamos el error para que el frontend no rebote a ciegas
+        res.status(500).json({ 
+            active: false, 
+            error: "internal_server_error",
+            msg: e.message 
+        }); 
     }
 });
 
