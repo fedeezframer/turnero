@@ -338,7 +338,7 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 1,
+                    transaction_amount: 15,
                     currency_id: "ARS"
                 },
                 // Al terminar el pago, lo mandamos directo a su dashboard con su slug
