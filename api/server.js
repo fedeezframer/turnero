@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { google } from "googleapis";
 import { MercadoPagoConfig, Preference } from "mercadopago";
 import fetch from "node-fetch";
+import crypto from "crypto";
 
 const app = express();
 
@@ -230,7 +231,7 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Socios pagándote a vos) ---
+// --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Socios pagándote a vos) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             if (subId) {
@@ -239,19 +240,25 @@ app.post("/webhook", async (req, res) => {
                 });
                 const subData = await response.json();
 
-                // Si la suscripción está autorizada o activa
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
+                    
+                    // 1. CAPTURAMOS EL TOKEN DE LA BACK_URL
+                    // Mercado Pago devuelve la url que configuramos en create-subscription
+                    const urlObj = new URL(subData.back_url);
+                    const accessToken = urlObj.searchParams.get("at"); 
+
                     const nuevaFechaVencimiento = new Date();
                     nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
-                    nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2); // Margen de gracia
+                    nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-                    // Intentamos actualizar al usuario existente por email
+                    // 2. ACTUALIZAMOS (O CREAMOS) CON EL TOKEN INCLUIDO
                     const { data: userUpdated, error: updateError } = await supabase
                         .from('usuarios')
                         .update({ 
                             plan: 'premium', 
                             tokens: 100000, 
+                            access_token: accessToken, // <--- GUARDAMOS EL PASE VIP
                             subscription_expiry: nuevaFechaVencimiento.toISOString() 
                         })
                         .eq('email', userEmail)
@@ -260,24 +267,24 @@ app.post("/webhook", async (req, res) => {
                     if (updateError) throw updateError;
 
                     if (!userUpdated || userUpdated.length === 0) {
-                        // AUTO-REGISTRO: Si el socio pagó pero no tenía cuenta aún
                         console.log(`🆕 Creando socio nuevo desde pago detectado: ${userEmail}`);
-                        const tempSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase() + "-" + Math.floor(Math.random() * 1000);
+                        // Usamos un slug predecible basado en el email para que coincida con el de la back_url
+                        const baseSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                         
                         await supabase.from('usuarios').insert([{
                             email: userEmail,
-                            slug: tempSlug,
+                            slug: baseSlug,
+                            access_token: accessToken, // <--- TAMBIÉN EN EL REGISTRO NUEVO
                             plan: 'premium',
                             tokens: 100000,
                             subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                            password: "cambiame-al-entrar",
+                            password: "auth-via-payment",
                             business_name: "Mi Nuevo Negocio",
                             sheet_id: MASTER_SHEET_ID
                         }]);
                     } else {
-                        // Si ya existía, limpiamos su caché de servidor
                         delete globalCache[userUpdated[0].slug];
-                        console.log(`🚀 Premium activado/renovado para: ${userEmail}`);
+                        console.log(`🚀 Premium y Magic Token activados para: ${userEmail}`);
                     }
                 }
             }
@@ -301,10 +308,14 @@ app.post("/api/create-subscription", async (req, res) => {
             return res.status(400).json({ error: "El email es obligatorio para generar la suscripción." });
         }
 
-        // Generamos el slug a partir del email para la vuelta al dashboard
+        // 1. Generamos el slug a partir del email para la vuelta al dashboard
         const userSlug = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        // Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
+        // 2. Generamos un Magic Token aleatorio y seguro de 32 caracteres (hexadecimal)
+        // Esto servirá como "llave" temporal para el login automático sin contraseña
+        const magicToken = crypto.randomBytes(16).toString('hex');
+
+        // 3. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
         const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
@@ -320,8 +331,9 @@ app.post("/api/create-subscription", async (req, res) => {
                     transaction_amount: 5000, // Ajustar al monto real en ARS
                     currency_id: "ARS"
                 },
-                // URL a la que vuelve el socio después de tocar "Finalizar"
-                back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&v=success`,
+                // IMPORTANTE: Agregamos el token 'at' a la URL de regreso
+                // Esto es lo que el Dashboard leerá para loguear al usuario automáticamente
+                back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&at=${magicToken}`,
                 status: "pending"
             })
         });
@@ -336,15 +348,16 @@ app.post("/api/create-subscription", async (req, res) => {
             });
         }
 
-        // Obtenemos el link de pago (init_point)
+        // Obtenemos el link de pago (init_point es producción, sandbox es para pruebas)
         const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
             throw new Error("No se encontró la URL de pago en la respuesta de Mercado Pago.");
         }
 
-        console.log(`🔗 Link de suscripción Premium generado para el socio: ${email}`);
+        console.log(`🔗 Link de suscripción Premium generado para: ${email} (Token: ${magicToken})`);
         
+        // Enviamos la URL y el mensaje de éxito al frontend
         res.json({ 
             success: true,
             init_point: checkoutUrl,
@@ -845,7 +858,8 @@ app.post("/cancel-appointment", async (req, res) => {
 app.get("/verify-session", async (req, res) => {
     try {
         const rawU = req.query.u;
-        const verificationToken = req.query.v; // Capturamos el token 'v' por si lo necesitas luego
+        // Capturamos el Magic Token que viene en la URL como 'at'
+        const magicToken = req.query.at; 
 
         if (!rawU) {
             console.log("⚠️ Intento de verificación sin parámetro 'u'");
@@ -857,9 +871,10 @@ app.get("/verify-session", async (req, res) => {
         
         console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
 
+        // IMPORTANTE: Agregamos 'access_token' a la selección para poder compararlo
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('slug, plan, subscription_expiry')
+            .select('slug, plan, subscription_expiry, access_token')
             .eq('slug', slug)
             .single();
 
@@ -873,12 +888,31 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- LÓGICA DE SUSCRIPCIÓN ---
+        // --- LÓGICA DE MAGIC LOGIN (Pase VIP) ---
+        // Si el usuario trae un token y ese token coincide con el que guardó el Webhook...
+        if (magicToken && user.access_token === magicToken) {
+            console.log(`✨ Magic Login exitoso para: ${slug}. Limpiando token usado...`);
+            
+            // Borramos el token de la DB para que el link no sirva una segunda vez (Seguridad)
+            await supabase
+                .from('usuarios')
+                .update({ access_token: null })
+                .eq('slug', slug);
+            
+            // Retornamos éxito inmediato saltándonos otras validaciones
+            return res.json({ 
+                active: true, 
+                slug: user.slug, 
+                plan: user.plan,
+                magicLogin: true 
+            });
+        }
+
+        // --- LÓGICA DE SUSCRIPCIÓN (Para ingresos normales sin token) ---
         if (user.plan === 'premium') {
             if (!user.subscription_expiry) {
                 console.log(`⚠️ Usuario ${slug} es premium pero no tiene fecha de vencimiento.`);
-                // Por seguridad, si no tiene fecha pero es premium, lo dejamos pasar 
-                // o puedes marcarlo como expirado según prefieras.
+                // Por seguridad, si no tiene fecha pero es premium, lo dejamos pasar
             } else {
                 const ahora = new Date();
                 const vencimiento = new Date(user.subscription_expiry);
@@ -895,7 +929,7 @@ app.get("/verify-session", async (req, res) => {
             }
         }
 
-        // --- TODO OK ---
+        // --- TODO OK (Login manual o sesión persistente) ---
         console.log(`✅ Sesión confirmada para: ${slug}`);
         res.json({ 
             active: true, 
