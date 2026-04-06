@@ -518,21 +518,22 @@ app.post("/api/verify-and-register", async (req, res) => {
             let fechaVencimientoInicial = null;
             
             if (isPremium) {
-                // Le damos 24 horas de gracia inicial. 
-                // Esto permite que el usuario entre al dashboard aunque el Webhook de MP no haya impactado todavía.
+                // Le damos 24 horas de gracia inicial para que entre al dashboard
                 const ahora = new Date();
                 ahora.setHours(ahora.getHours() + 24); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
 
+            // --- NUEVO: GENERACIÓN DE MAGIC TOKEN PARA LOGIN AUTOMÁTICO ---
+            const magicToken = crypto.randomBytes(16).toString('hex');
+
             // 4. Insertar en la tabla de Usuarios de Supabase
-            // Usamos un objeto de configuración completo para evitar que falten datos por defecto
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
                 nombre_persona: nombre_persona || "Dueño",
                 business_name: finalName,
-                password: String(result.password), // Contraseña que viene del proceso de verificación
+                password: String(result.password),
                 sheet_id: MASTER_SHEET_ID,
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
@@ -540,35 +541,36 @@ app.post("/api/verify-and-register", async (req, res) => {
                 plan: isPremium ? 'premium' : 'gratis',
                 tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
-                metodo_pago: 'none', // Se inicializa en none hasta que vinculen MP
+                metodo_pago: 'none',
                 subscription_expiry: fechaVencimientoInicial,
                 excepciones: [],
-                mp_access_token: null // Aseguramos que arranque limpio
+                mp_access_token: null,
+                access_token: magicToken // <--- GUARDAMOS EL TOKEN EN LA DB
             }]);
 
             if (error) {
-                // Manejo específico para nombres de negocio duplicados (Primary Key / Unique constraint en slug)
                 if (error.code === '23505') {
                     return res.status(400).json({ error: "Este nombre de negocio ya está registrado. Probá con uno similar." });
                 }
                 throw error;
             }
 
-            // 5. Respuesta exitosa
-            console.log(`✨ Nuevo usuario registrado exitosamente: ${cleanSlug} (Plan: ${plan})`);
+            // 5. Respuesta exitosa incluyendo el TOKEN para el frontend
+            console.log(`✨ Nuevo usuario registrado: ${cleanSlug}. Magic Token generado.`);
+            
             res.json({ 
                 success: true, 
                 slug: cleanSlug,
+                at: magicToken, // <--- AHORA EL FRONTEND RECIBE EL TOKEN REAL
                 message: "Cuenta verificada y creada con éxito."
             });
 
         } else {
-            // El código no coincide o expiró en el flujo de Google Sheets
-            res.status(400).json({ error: "El código de verificación no es válido o ya expiró. Solicitá uno nuevo." });
+            res.status(400).json({ error: "El código de verificación no es válido o ya expiró." });
         }
     } catch (e) { 
         console.error("❌ Error crítico en el proceso de registro:", e.message);
-        res.status(500).json({ error: "Hubo un problema al crear tu cuenta. Por favor, intentá de nuevo en unos minutos." }); 
+        res.status(500).json({ error: "Hubo un problema al crear tu cuenta." }); 
     }
 });
 
