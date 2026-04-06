@@ -576,9 +576,7 @@ app.post("/api/verify-and-register", async (req, res) => {
 
 app.post("/login", async (req, res) => {
     try {
-        // 1. Log para ver qué está llegando realmente
         console.log("Login attempt:", req.body);
-
         const slug = getCleanSlug(req.body.slug);
         const { password } = req.body;
 
@@ -589,16 +587,22 @@ app.post("/login", async (req, res) => {
             .single();
 
         if (error || !user) {
-            console.log("Usuario no encontrado:", slug);
             return res.status(401).json({ success: false, error: "Usuario no encontrado" });
         }
 
-        // Usamos String() para evitar problemas si la pass es numérica en la DB
         if (String(user.password) === String(password)) {
+            // --- NUEVO: Generamos un token también al loguearse manualmente ---
+            const magicToken = crypto.randomBytes(16).toString('hex');
+            
+            await supabase
+                .from('usuarios')
+                .update({ access_token: magicToken })
+                .eq('slug', slug);
+
             return res.json({ 
                 success: true, 
                 slug: user.slug,
-                // Opcional: podrías devolver un token de sesión aquí
+                at: magicToken // <--- Se lo pasamos al front para que ProtectedRoute lo use
             });
         }
 
@@ -608,6 +612,7 @@ app.post("/login", async (req, res) => {
         res.status(500).json({ error: e.message }); 
     }
 });
+
 app.post("/api/request-password-reset", async (req, res) => {
     try {
         const { email, newPassword } = req.body;
@@ -671,6 +676,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
     const now = Date.now();
 
     // 1. Verificación de Caché
+    // Si los datos están en caché y no pasaron más de 20 segundos, los devolvemos rápido.
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
@@ -687,20 +693,26 @@ app.get("/admin-stats/:slug", async (req, res) => {
             return res.status(404).json({ error: "Usuario no encontrado" });
         }
 
-        // 3. Lógica de Control de Suscripción Premium
+        // 3. Lógica de Control de Suscripción Premium (Con Red de Seguridad para Magic Login)
         const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
         
         if (user.plan === 'premium') {
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
+            
+            // RED DE SEGURIDAD: Si tiene un access_token (o sea, acaba de entrar por login/pago), 
+            // le permitimos ver las stats aunque el vencimiento esté al límite o nulo.
+            const hasActiveMagicToken = user.access_token !== null;
 
-            // Si el plan es premium pero no hay fecha o ya pasó, bloqueamos con 402
-            if (!vencimiento || ahoraArg > vencimiento) {
-                return res.status(402).json({ 
-                    error: "Suscripción Premium vencida",
-                    expired: true,
-                    message: "Socio, tu suscripción Premium ha expirado. Por favor, renovala para seguir recibiendo turnos.",
-                    slug: user.slug
-                });
+            if (!hasActiveMagicToken) {
+                // Si NO es un Magic Login, validamos el vencimiento normalmente
+                if (!vencimiento || ahoraArg > vencimiento) {
+                    return res.status(402).json({ 
+                        error: "Suscripción Premium vencida",
+                        expired: true,
+                        message: "Socio, tu suscripción Premium ha expirado. Por favor, renovala para seguir recibiendo turnos.",
+                        slug: user.slug
+                    });
+                }
             }
         }
 
@@ -712,7 +724,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const allRows = response.data.values || [];
-        // Filtramos las filas: mantenemos el encabezado (i===0) y las que pertenecen a este negocio (slug)
+        // Filtramos las filas: mantenemos el encabezado y las que pertenecen a este negocio (slug)
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         // 5. Procesamiento de Estadísticas
