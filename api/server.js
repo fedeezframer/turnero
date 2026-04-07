@@ -885,10 +885,10 @@ app.get("/verify-session", async (req, res) => {
         
         console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
 
-        // IMPORTANTE: Agregamos 'access_token' a la selección para poder compararlo
+        // IMPORTANTE: Seleccionamos tokens y access_token además de los datos básicos
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('slug, plan, subscription_expiry, access_token')
+            .select('slug, plan, subscription_expiry, access_token, tokens')
             .eq('slug', slug)
             .single();
 
@@ -902,7 +902,7 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- LÓGICA DE MAGIC LOGIN (Pase VIP) ---
+        // --- 1. LÓGICA DE MAGIC LOGIN (Pase VIP) ---
         // Si el usuario trae un token y ese token coincide con el que guardó el Webhook...
         if (magicToken && user.access_token === magicToken) {
             console.log(`✨ Magic Login exitoso para: ${slug}. Limpiando token usado...`);
@@ -922,12 +922,11 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- LÓGICA DE SUSCRIPCIÓN (Para ingresos normales sin token) ---
+        // --- 2. LÓGICA DE BLOQUEO (402 PAYMENT REQUIRED) ---
+
+        // CASO A: Usuario Premium con suscripción vencida
         if (user.plan === 'premium') {
-            if (!user.subscription_expiry) {
-                console.log(`⚠️ Usuario ${slug} es premium pero no tiene fecha de vencimiento.`);
-                // Por seguridad, si no tiene fecha pero es premium, lo dejamos pasar
-            } else {
+            if (user.subscription_expiry) {
                 const ahora = new Date();
                 const vencimiento = new Date(user.subscription_expiry);
 
@@ -940,15 +939,32 @@ app.get("/verify-session", async (req, res) => {
                         expiry: user.subscription_expiry 
                     });
                 }
+            } else {
+                console.log(`⚠️ Usuario ${slug} es premium pero no tiene fecha de vencimiento. Se permite acceso.`);
             }
         }
 
-        // --- TODO OK (Login manual o sesión persistente) ---
-        console.log(`✅ Sesión confirmada para: ${slug}`);
+        // CASO B: Usuario Gratis sin tokens disponibles
+        if (user.plan === 'gratis') {
+            // Si tokens es null o menor/igual a cero, bloqueamos el acceso
+            if (user.tokens === null || user.tokens <= 0) {
+                console.log(`🚫 Acceso denegado por falta de tokens para: ${slug}`);
+                // Enviamos 402 para disparar la redirección en el dashboard
+                return res.status(402).json({
+                    active: false,
+                    reason: "no_tokens",
+                    tokens: user.tokens
+                });
+            }
+        }
+
+        // --- 3. TODO OK (Login manual o sesión persistente) ---
+        console.log(`✅ Sesión confirmada para: ${slug} (${user.plan.toUpperCase()})`);
         res.json({ 
             active: true, 
             slug: user.slug, 
-            plan: user.plan 
+            plan: user.plan,
+            tokens: user.tokens
         });
 
     } catch (e) { 
