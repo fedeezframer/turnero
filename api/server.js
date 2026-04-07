@@ -454,7 +454,10 @@ app.post("/create-booking", async (req, res) => {
 app.post("/api/request-verification", async (req, res) => {
     try {
         const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
-        if (!email || !business || !password) return res.status(400).json({ error: "Faltan datos." });
+        
+        if (!email || !business || !password) {
+            return res.status(400).json({ error: "Faltan datos obligatorios (email, negocio o pass)." });
+        }
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -462,19 +465,35 @@ app.post("/api/request-verification", async (req, res) => {
             body: JSON.stringify({
                 action: "sendCode",
                 email: email.trim().toLowerCase(),
-                usuario: business,
+                usuario: business, // Google espera 'usuario'
                 password, plan, precio, duracion_turno, tokens,
                 horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
             })
         });
 
         const text = await googleRes.text();
-        const result = JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1));
-        if (result.status === "success") res.json({ success: true });
-        else res.status(500).json({ error: result.message });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+        
+        // Buscamos el JSON de forma segura
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        
+        if (start === -1 || end === -1) {
+            console.error("Respuesta no válida de Google:", text);
+            return res.status(500).json({ error: "Google Apps Script devolvió un formato inválido." });
+        }
 
+        const result = JSON.parse(text.substring(start, end + 1));
+        
+        if (result.status === "success") {
+            res.json({ success: true });
+        } else {
+            res.status(500).json({ error: result.message || "Error en Google Script" });
+        }
+    } catch (e) { 
+        console.error("Error en request-verification:", e.message);
+        res.status(500).json({ error: "Error de conexión con el servicio de correos." }); 
+    }
+});
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { 
