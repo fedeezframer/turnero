@@ -328,7 +328,7 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 5000, // Ajustar al monto real en ARS
+                    transaction_amount: 15, // Ajustar al monto real en ARS
                     currency_id: "ARS"
                 },
                 // IMPORTANTE: Agregamos el token 'at' a la URL de regreso
