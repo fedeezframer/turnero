@@ -11,6 +11,7 @@ const app = express();
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg";
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyFCX6iK4N6bkA9nKQ8wgN8EawC-79-bxyuac7MSsXjukef-Q6OlBktXi3jPffzVVBR/exec";
+const registrosTemporales = {};
 
 app.use(cors({
     origin: '*',
@@ -198,7 +199,7 @@ app.post("/webhook", async (req, res) => {
     const { query, body } = req;
 
     try {
-        // --- A. LÓGICA PARA PAGOS DE TURNOS (Clientes finales pagando a socios) ---
+        // --- A. LÓGICA PARA PAGOS DE TURNOS ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -209,7 +210,6 @@ app.post("/webhook", async (req, res) => {
 
                 if (paymentData.status === "approved" && paymentData.metadata) {
                     const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
-                    
                     const partes = fecha.split("-");
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
@@ -224,14 +224,15 @@ app.post("/webhook", async (req, res) => {
                         }
                     });
 
-                    await handleTokenDiscount(slug);
-                    delete globalCache[slug]; // Limpiamos caché para ver el turno al instante
-                    console.log(`✅ Turno agendado y tokens descontados para: ${slug}`);
+                    // handleTokenDiscount es una función interna tuya para descontar tokens
+                    if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
+                    delete globalCache[slug];
+                    console.log(`✅ Turno agendado para: ${slug}`);
                 }
             }
         }
 
-// --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Socios pagándote a vos) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Socios) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             if (subId) {
@@ -243,61 +244,95 @@ app.post("/webhook", async (req, res) => {
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
                     
-                    // 1. CAPTURAMOS EL TOKEN DE LA BACK_URL
-                    // Mercado Pago devuelve la url que configuramos en create-subscription
+                    // Capturamos el Magic Token que pusimos en la back_url al crear la suscripción
                     const urlObj = new URL(subData.back_url);
                     const accessToken = urlObj.searchParams.get("at"); 
+                    const urlSlug = urlObj.searchParams.get("u");
 
                     const nuevaFechaVencimiento = new Date();
                     nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
                     nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-                    // 2. ACTUALIZAMOS (O CREAMOS) CON EL TOKEN INCLUIDO
-                    const { data: userUpdated, error: updateError } = await supabase
-                        .from('usuarios')
-                        .update({ 
-                            plan: 'premium', 
-                            tokens: 100000, 
-                            access_token: accessToken, // <--- GUARDAMOS EL PASE VIP
-                            subscription_expiry: nuevaFechaVencimiento.toISOString() 
-                        })
-                        .eq('email', userEmail)
-                        .select();
+                    // 1. Intentamos rescatar los datos reales del socio desde nuestra memoria temporal
+                    const datosSocio = registrosTemporales[userEmail];
 
-                    if (updateError) throw updateError;
-
-                    if (!userUpdated || userUpdated.length === 0) {
-                        console.log(`🆕 Creando socio nuevo desde pago detectado: ${userEmail}`);
-                        // Usamos un slug predecible basado en el email para que coincida con el de la back_url
-                        const baseSlug = userEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    if (datosSocio) {
+                        console.log(`🚀 Rescatando datos reales para ${userEmail} desde memoria.`);
                         
-                        await supabase.from('usuarios').insert([{
+                        // Generamos el slug real basado en su nombre de negocio
+                        const realSlug = datosSocio.business_name
+                            .toLowerCase()
+                            .trim()
+                            .replace(/\s+/g, '-')
+                            .replace(/[^a-z0-9-]/g, '');
+
+                        // Upsert: Si existe actualiza, si no inserta
+                        const { error: upsertError } = await supabase.from('usuarios').upsert({
                             email: userEmail,
-                            slug: baseSlug,
-                            access_token: accessToken, // <--- TAMBIÉN EN EL REGISTRO NUEVO
+                            slug: realSlug,
+                            business_name: datosSocio.business_name,
+                            nombre_persona: datosSocio.nombre_persona,
+                            precio: datosSocio.precio,
+                            duracion_turno: datosSocio.duracion_turno,
+                            horarios: datosSocio.horarios,
+                            telefono: datosSocio.telefono,
                             plan: 'premium',
                             tokens: 100000,
+                            access_token: accessToken,
                             subscription_expiry: nuevaFechaVencimiento.toISOString(),
                             password: "auth-via-payment",
-                            business_name: "Mi Nuevo Negocio",
                             sheet_id: MASTER_SHEET_ID
-                        }]);
+                        }, { onConflict: 'email' });
+
+                        if (upsertError) console.error("Error al guardar socio Premium:", upsertError);
+
+                        // Borramos de la memoria para limpiar el server
+                        delete registrosTemporales[userEmail];
+                        if (realSlug) delete globalCache[realSlug];
+                        
                     } else {
-                        delete globalCache[userUpdated[0].slug];
-                        console.log(`🚀 Premium y Magic Token activados para: ${userEmail}`);
+                        // CASO FALLBACK: Si no hay datos en memoria (ej. server reiniciado)
+                        console.log(`⚠️ No hay datos en memoria para ${userEmail}. Usando fallback básico.`);
+                        const fallbackSlug = urlSlug || userEmail.split('@')[0].replace(/[^a-z0-9]/g, "");
+
+                        await supabase.from('usuarios').update({ 
+                            plan: 'premium', 
+                            tokens: 100000, 
+                            access_token: accessToken, 
+                            subscription_expiry: nuevaFechaVencimiento.toISOString() 
+                        }).eq('email', userEmail);
                     }
                 }
             }
         }
 
-        // Siempre respondemos 200 a Mercado Pago al final de todo el proceso
         res.sendStatus(200);
 
     } catch (e) {
-        console.error("❌ Error en Webhook General:", e.message);
-        // Respondemos 200 igual para evitar que MP reintente infinitamente
+        console.error("❌ Error en Webhook:", e.message);
         res.sendStatus(200);
     }
+});
+
+app.post("/api/pre-register-premium", (req, res) => {
+    const { email, business_name, nombre_persona, precio, duracion_turno, horarios, telefono, plan } = req.body;
+    
+    if (!email) return res.status(400).json({ error: "Email requerido" });
+
+    // Guardamos todo el objeto en la memoria del servidor
+    registrosTemporales[email.trim().toLowerCase()] = {
+        business_name,
+        nombre_persona,
+        precio,
+        duracion_turno,
+        horarios,
+        telefono,
+        plan,
+        timestamp: Date.now() // Para saber cuándo se creó
+    };
+
+    console.log(`📦 Datos temporales guardados para: ${email}`);
+    res.json({ success: true });
 });
 
 app.post("/api/create-subscription", async (req, res) => {
