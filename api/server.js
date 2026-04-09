@@ -420,6 +420,7 @@ app.post("/api/create-subscription", async (req, res) => {
 
         // Validación de entrada
         if (!email) {
+            console.error("⚠️ Intento de suscripción sin email.");
             return res.status(400).json({ 
                 error: "El email es obligatorio para generar la suscripción." 
             });
@@ -428,7 +429,7 @@ app.post("/api/create-subscription", async (req, res) => {
         const userEmailLimpio = email.toLowerCase().trim();
 
         // 1. Buscamos al usuario en Supabase para obtener su slug real
-        // Esto es mejor que generarlo de nuevo para asegurar consistencia
+        // Esto asegura que la suscripción se vincule al negocio correcto
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('slug')
@@ -436,18 +437,17 @@ app.post("/api/create-subscription", async (req, res) => {
             .single();
 
         if (userError || !user) {
-            console.error("❌ Error: Se intentó crear suscripción para un email no registrado.");
+            console.error(`❌ Error: Usuario no encontrado para el email: ${userEmailLimpio}`);
             return res.status(404).json({ error: "Usuario no encontrado. Primero debe completar el registro." });
         }
 
         const userSlug = user.slug;
 
-        // 2. Generamos un Magic Token aleatorio y seguro
+        // 2. Generamos un Magic Token aleatorio y seguro para el Login Automático
         const magicToken = crypto.randomBytes(16).toString('hex');
 
         // 3. PERSISTENCIA EN SUPABASE
-        // Guardamos el token en la columna 'access_token' del usuario.
-        // Esto permite que al volver del pago, el dashboard lo reconozca.
+        // Guardamos el token en la columna 'access_token' para validarlo al volver del pago
         const { error: updateError } = await supabase
             .from('usuarios')
             .update({ access_token: magicToken })
@@ -461,6 +461,7 @@ app.post("/api/create-subscription", async (req, res) => {
         console.log(`🔑 Magic Token vinculado en DB para: ${userEmailLimpio}`);
 
         // 4. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
+        // Agregamos external_reference para identificar al usuario por SLUG en el Webhook
         const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
@@ -470,14 +471,15 @@ app.post("/api/create-subscription", async (req, res) => {
             body: JSON.stringify({
                 reason: "Plan Premium NegoSocio",
                 payer_email: userEmailLimpio,
+                // --- MEJORA CLAVE: Vinculamos el slug directamente ---
+                external_reference: userSlug, 
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15, // Cambiar por el valor real en ARS (ej: 15000)
+                    transaction_amount: 15000, // Ajustar al valor real en pesos argentinos
                     currency_id: "ARS"
                 },
-                // La back_url lleva el slug real del negocio y el magic token
-                // El dashboard verificará que este 'at' coincida con el de la DB
+                // La back_url redirige al Dashboard de Framer con los parámetros de sesión
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&at=${magicToken}`,
                 status: "pending"
             })
@@ -485,7 +487,7 @@ app.post("/api/create-subscription", async (req, res) => {
 
         const subscription = await response.json();
 
-        // Manejo de errores de la API de Mercado Pago
+        // Manejo de errores específicos de la API de Mercado Pago
         if (!response.ok) {
             console.error("❌ Error de MP al generar suscripción:", JSON.stringify(subscription, null, 2));
             return res.status(response.status).json({ 
@@ -494,7 +496,7 @@ app.post("/api/create-subscription", async (req, res) => {
             });
         }
 
-        // Obtenemos el link de pago oficial
+        // Obtenemos el link de pago oficial (init_point)
         const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
@@ -502,9 +504,9 @@ app.post("/api/create-subscription", async (req, res) => {
             throw new Error("No se encontró la URL de pago en la respuesta de Mercado Pago.");
         }
 
-        console.log(`🔗 Link de suscripción Premium generado para: ${userEmailLimpio}`);
+        console.log(`🔗 Link de suscripción Premium generado para: ${userEmailLimpio} (Slug: ${userSlug})`);
         
-        // Enviamos la URL al frontend (Framer)
+        // Enviamos la URL al frontend para la redirección
         res.json({ 
             success: true,
             init_point: checkoutUrl,
