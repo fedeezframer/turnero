@@ -201,7 +201,7 @@ app.post("/webhook", async (req, res) => {
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
 
-        // --- A. LÓGICA PARA PAGOS DE TURNOS (Venta única) ---
+        // --- A. LÓGICA PARA PAGOS DE TURNOS (Venta única de clientes) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -211,7 +211,11 @@ app.post("/webhook", async (req, res) => {
                 const paymentData = await paymentResponse.json();
 
                 if (paymentData.status === "approved" && paymentData.metadata) {
-                    const { nombre, telefono, fecha, hora, slug } = paymentData.metadata;
+                    const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
+                    
+                    // Usamos la limpieza oficial de slug para evitar errores de matching
+                    const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+                    
                     const partes = fecha.split("-");
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
@@ -222,21 +226,29 @@ app.post("/webhook", async (req, res) => {
                         range: "A:E",
                         valueInputOption: "RAW",
                         requestBody: { 
-                            values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] 
+                            values: [[
+                                nombre.trim(), 
+                                telefono.toString().trim(), 
+                                textoTurnoNuevo, 
+                                fechaHoyReal, 
+                                slug
+                            ]] 
                         }
                     });
 
+                    // Descontar token al dueño del negocio
                     if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
+                    
+                    // Limpiar caché para que el dashboard muestre el nuevo turno
                     delete globalCache[slug];
-                    console.log(`✅ Turno agendado exitosamente para el negocio: ${slug}`);
+                    console.log(`✅ Turno agendado y token descontado para el negocio: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Suscripciones recurrentes) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Registro/Renovación) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
-            console.log(`💳 Procesando notificación de suscripción ID: ${subId}`);
             
             if (subId) {
                 const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
@@ -244,102 +256,135 @@ app.post("/webhook", async (req, res) => {
                 });
                 const subData = await response.json();
 
-                // Verificamos que la suscripción esté activa o autorizada
+                // Solo procesamos si está activo o autorizado
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
-                    console.log(`✅ Pago de suscripción verificado para el email: ${userEmail}`);
+                    console.log(`💳 Procesando suscripción Premium para: ${userEmail}`);
 
-                    const urlObj = new URL(subData.back_url);
-                    const accessToken = urlObj.searchParams.get("at"); 
-                    const urlSlug = urlObj.searchParams.get("u");
-
+                    // Intentamos recuperar los datos del Guardián (Framer)
+                    const datosSocio = registrosTemporales[userEmail];
+                    
                     // Calculamos vencimiento (1 mes + 2 días de gracia)
                     const nuevaFechaVencimiento = new Date();
                     nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
                     nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-                    // Intentamos recuperar los datos del registro previo en memoria
-                    const datosSocio = registrosTemporales[userEmail];
-
-                    if (datosSocio) {
-                        console.log(`🚀 Datos encontrados en memoria. Creando/Actualizando usuario Premium...`);
-                        
-                        const realSlug = datosSocio.business_name
-                            .toLowerCase()
-                            .trim()
-                            .replace(/\s+/g, '-')
-                            .replace(/[^a-z0-9-]/g, '');
-
-                        const { error: upsertError } = await supabase.from('usuarios').upsert({
-                            email: userEmail,
-                            slug: realSlug,
-                            business_name: datosSocio.business_name,
-                            nombre_persona: datosSocio.nombre_persona,
-                            precio: datosSocio.precio,
-                            duracion_turno: datosSocio.duracion_turno,
-                            horarios: datosSocio.horarios,
-                            telefono: datosSocio.telefono,
-                            plan: 'premium',
-                            tokens: 100000,
-                            access_token: accessToken,
-                            subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                            password: datosSocio.password || "auth-via-payment",
-                            sheet_id: MASTER_SHEET_ID
-                        }, { onConflict: 'email' });
-
-                        if (upsertError) {
-                            console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
-                        } else {
-                            console.log(`✨ Usuario Premium ${realSlug} guardado correctamente.`);
+                    // Recuperamos el Magic Token que enviamos en la back_url original si es posible
+                    let magicToken = "session_" + crypto.randomBytes(8).toString('hex');
+                    try {
+                        const urlObj = new URL(subData.back_url);
+                        if (urlObj.searchParams.get("at")) {
+                            magicToken = urlObj.searchParams.get("at");
                         }
+                    } catch (e) {
+                        console.log("No se pudo extraer token de back_url, usando uno genérico.");
+                    }
 
-                        // Limpieza de datos temporales
-                        delete registrosTemporales[userEmail];
-                        if (realSlug) delete globalCache[realSlug];
-                        
+                    // Definimos el slug basándonos en el nombre del negocio (si existe) o el email
+                    const nombreBase = datosSocio?.business_name || userEmail.split('@')[0];
+                    const realSlug = nombreBase
+                        .toLowerCase()
+                        .trim()
+                        .normalize("NFD")
+                        .replace(/[\u0300-\u036f]/g, "")
+                        .replace(/\s+/g, '-')
+                        .replace(/[^a-z0-9-]/g, '');
+
+                    console.log(`🚀 Ejecutando UPSERT para asegurar creación de usuario: ${realSlug}`);
+
+                    // UPSERT: Si el email existe, actualiza. Si no, crea.
+                    const { error: upsertError } = await supabase.from('usuarios').upsert({
+                        email: userEmail,
+                        slug: realSlug,
+                        business_name: datosSocio?.business_name || "Mi Negocio Premium",
+                        nombre_persona: datosSocio?.nombre_persona || "Dueño Premium",
+                        precio: parseInt(datosSocio?.precio) || 0,
+                        duracion_turno: parseInt(datosSocio?.duracion_turno) || 30,
+                        horarios: datosSocio?.horarios || {},
+                        telefono: datosSocio?.telefono || null,
+                        plan: 'premium',
+                        tokens: 100000,
+                        access_token: magicToken,
+                        subscription_expiry: nuevaFechaVencimiento.toISOString(),
+                        password: datosSocio?.password || "auth-via-payment",
+                        sheet_id: MASTER_SHEET_ID, // Mantenemos el sheet en común
+                        metodo_pago: 'mercadopago'
+                    }, { onConflict: 'email' });
+
+                    if (upsertError) {
+                        console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
                     } else {
-                        // Caso donde los datos no están en memoria (ej: reinicio de server)
-                        console.log(`⚠️ Advertencia: No hay datos en registrosTemporales para ${userEmail}. Aplicando actualización de emergencia.`);
-                        
-                        await supabase.from('usuarios').update({ 
-                            plan: 'premium', 
-                            tokens: 100000, 
-                            access_token: accessToken, 
-                            subscription_expiry: nuevaFechaVencimiento.toISOString() 
-                        }).eq('email', userEmail);
+                        console.log(`✨ Usuario Premium ${realSlug} sincronizado correctamente en Supabase.`);
+                        // Limpieza de memoria temporal
+                        delete registrosTemporales[userEmail];
+                        delete globalCache[realSlug];
                     }
                 }
             }
         }
 
-        // Siempre responder 200 a Mercado Pago para evitar reintentos infinitos
+        // Siempre responder 200 a Mercado Pago inmediatamente
         res.sendStatus(200);
 
     } catch (e) {
         console.error("❌ Error crítico dentro del Webhook:", e.message);
+        // Respondemos 200 igual para que MP no nos sature con reintentos si el error es de lógica
         res.sendStatus(200);
     }
 });
 
 app.post("/api/pre-register-premium", (req, res) => {
-    const { email, business_name, nombre_persona, precio, duracion_turno, horarios, telefono, plan } = req.body;
-    
-    if (!email) return res.status(400).json({ error: "Email requerido" });
-
-    // Guardamos todo el objeto en la memoria del servidor
-    registrosTemporales[email.trim().toLowerCase()] = {
-        business_name,
-        nombre_persona,
-        precio,
-        duracion_turno,
-        horarios,
-        telefono,
+    // Desestructuramos incluyendo 'password', que es clave para el login posterior
+    const { 
+        email, 
+        business_name, 
+        nombre_persona, 
+        precio, 
+        duracion_turno, 
+        horarios, 
+        telefono, 
         plan,
-        timestamp: Date.now() // Para saber cuándo se creó
+        password 
+    } = req.body;
+    
+    // Validación básica de seguridad
+    if (!email) {
+        return res.status(400).json({ error: "El email es requerido para el pre-registro." });
+    }
+
+    const emailKey = email.trim().toLowerCase();
+
+    // Verificamos si ya existe un registro temporal (por ejemplo, si ya se generó un token)
+    // para no pisar el access_token si ya fue creado por /api/create-subscription
+    const registroExistente = registrosTemporales[emailKey] || {};
+
+    // Guardamos/Actualizamos el objeto en la memoria del servidor
+    registrosTemporales[emailKey] = {
+        ...registroExistente, // Mantenemos el access_token si ya existe
+        business_name: business_name || registroExistente.business_name,
+        nombre_persona: nombre_persona || registroExistente.nombre_persona,
+        precio: precio || registroExistente.precio,
+        duracion_turno: duracion_turno || registroExistente.duracion_turno,
+        horarios: horarios || registroExistente.horarios,
+        telefono: telefono || registroExistente.telefono,
+        plan: plan || 'premium',
+        password: password || registroExistente.password, // Guardamos la clave real del usuario
+        timestamp: Date.now() // Marca de tiempo para limpieza de memoria (opcional)
     };
 
-    console.log(`📦 Datos temporales guardados para: ${email}`);
-    res.json({ success: true });
+    console.log(`📦 Datos temporales de registro guardados/actualizados para: ${emailKey}`);
+    
+    // Opcional: Log de depuración para verificar que el password llegó
+    if (password) {
+        console.log(`🔑 Password capturado correctamente para el flujo de pago.`);
+    } else {
+        console.warn(`⚠️ Advertencia: No se recibió password en el pre-registro de ${emailKey}`);
+    }
+
+    res.json({ 
+        success: true, 
+        message: "Datos temporales almacenados correctamente. Listo para el pago." 
+    });
 });
 
 app.post("/api/create-subscription", async (req, res) => {
@@ -359,12 +404,22 @@ app.post("/api/create-subscription", async (req, res) => {
         // Esto sirve como identificador visual en la URL de regreso
         const userSlug = userEmailLimpio.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        // 2. Generamos un Magic Token aleatorio y seguro de 32 caracteres (hexadecimal)
-        // Este token se envía en la back_url y se guarda en Supabase vía Webhook para validar la sesión inicial
+        // 2. Generamos un Magic Token aleatorio y seguro
+        // Este token se envía en la back_url y se guarda en registrosTemporales para que el Webhook lo use
         const magicToken = crypto.randomBytes(16).toString('hex');
 
+        // --- NUEVO: GUARDADO PREVENTIVO EN MEMORIA ---
+        // Si el usuario ya hizo el pre-register, vinculamos el token a sus datos existentes
+        if (registrosTemporales[userEmailLimpio]) {
+            registrosTemporales[userEmailLimpio].access_token = magicToken;
+            console.log(`🔑 Magic Token vinculado a datos temporales de: ${userEmailLimpio}`);
+        } else {
+            // Si por alguna razón no hay pre-register, creamos el espacio para no perder el token
+            registrosTemporales[userEmailLimpio] = { access_token: magicToken };
+            console.log(`⚠️ Advertencia: Creando registro temporal solo para token (faltó pre-register) para: ${userEmailLimpio}`);
+        }
+
         // 3. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
-        // Usamos fetch para tener control total sobre los headers y el cuerpo de la petición
         const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
@@ -377,11 +432,11 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15, // Importante: Ajustar este valor al precio real de tu servicio
+                    transaction_amount: 15, // Ajustar al valor real
                     currency_id: "ARS"
                 },
-                // La back_url es clave: lleva el slug (u) y el magic token (at)
-                // El dashboard de Framer capturará estos parámetros para autenticar al usuario
+                // La back_url lleva el slug (u) y el magic token (at)
+                // Es vital que el "at" coincida con el que guardamos en registrosTemporales
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&at=${magicToken}`,
                 status: "pending"
             })
@@ -399,8 +454,6 @@ app.post("/api/create-subscription", async (req, res) => {
         }
 
         // Obtenemos el link de pago
-        // init_point: Link oficial para producción
-        // sandbox_init_point: Link para entornos de prueba
         const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
@@ -416,7 +469,7 @@ app.post("/api/create-subscription", async (req, res) => {
             success: true,
             init_point: checkoutUrl,
             message: "Link de suscripción generado correctamente.",
-            token_generated: magicToken // Opcional: útil para debug en desarrollo
+            token_generated: magicToken 
         }); 
 
     } catch (e) {
