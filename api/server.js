@@ -201,7 +201,7 @@ app.post("/webhook", async (req, res) => {
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
 
-        // --- A. LÓGICA PARA PAGOS DE TURNOS (Venta única de clientes) ---
+        // --- A. LÓGICA PARA PAGOS DE TURNOS (Sin cambios) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -227,12 +227,11 @@ app.post("/webhook", async (req, res) => {
 
                     if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
                     delete globalCache[slug];
-                    console.log(`✅ Turno agendado para: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Validación obligatoria via Sheets) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (El arreglo para Mayra) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             
@@ -243,10 +242,24 @@ app.post("/webhook", async (req, res) => {
                 const subData = await response.json();
 
                 if (subData.status === "authorized" || subData.status === "active") {
-                    const userEmail = subData.payer_email.trim().toLowerCase();
-                    console.log(`💳 Procesando Premium para: ${userEmail}`);
+                    
+                    // 🔍 BÚSQUEDA EN CASCADA DEL EMAIL (Mercado Pago lo cambia según la versión)
+                    const userEmail = (
+                        subData.payer_email || 
+                        subData.payer?.email || 
+                        (subData.metadata && subData.metadata.email) ||
+                        ""
+                    ).trim().toLowerCase();
 
-                    // 1. BUSCAR EN SHEETS (Nuestra "Fuente de Verdad" persistente)
+                    console.log(`💳 Procesando suscripción. Mail detectado: "${userEmail}"`);
+
+                    if (!userEmail) {
+                        console.error("❌ CRÍTICO: Mercado Pago no envió el email en ningún campo conocido.");
+                        console.log("Estructura recibida:", JSON.stringify(subData)); // Para debuggear en Render
+                        return res.sendStatus(200);
+                    }
+
+                    // 1. BUSCAR EN SHEETS (Única fuente de verdad)
                     const sheets = await getSheets();
                     const rangeRes = await sheets.spreadsheets.values.get({
                         spreadsheetId: MASTER_SHEET_ID,
@@ -254,61 +267,46 @@ app.post("/webhook", async (req, res) => {
                     });
                     
                     const rows = rangeRes.data.values || [];
-                    const filaEncontrada = [...rows].reverse().find(row => 
+                    const registroEnSheet = [...rows].reverse().find(row => 
                         row[0] && row[0].trim().toLowerCase() === userEmail
                     );
 
-                    let datosSocio = null;
-
-                    if (filaEncontrada && filaEncontrada[1]) {
-                        try {
-                            datosSocio = JSON.parse(filaEncontrada[1]);
-                        } catch (err) {
-                            console.error("❌ JSON corrupto en Sheets.");
-                        }
-                    } else {
-                        // Fallback a RAM solo si la Sheet falló, pero sin defaults automáticos
-                        datosSocio = registrosTemporales[userEmail];
-                    }
-
-                    // BLOQUEO DE SEGURIDAD: Si no hay datos reales, no creamos nada basura
-                    if (!datosSocio) {
-                        console.error(`🚫 ABORTADO: No existen datos previos para ${userEmail}.`);
+                    if (!registroEnSheet) {
+                        console.error(`🚫 Validación fallida: El mail ${userEmail} no existe en la hoja Premium Temp.`);
                         return res.sendStatus(200);
                     }
 
-                    // 2. CONFIGURACIÓN DE VENCIMIENTO Y TOKEN
+                    let datosSocio;
+                    try {
+                        datosSocio = JSON.parse(registroEnSheet[1]);
+                    } catch (e) {
+                        console.error("❌ Error: El JSON de la planilla está mal formado.");
+                        return res.sendStatus(200);
+                    }
+
+                    // 2. CONFIGURACIÓN FINAL
                     const vencimiento = new Date();
                     vencimiento.setMonth(vencimiento.getMonth() + 1);
                     vencimiento.setDate(vencimiento.getDate() + 2);
 
-                    let magicToken = datosSocio.access_token || crypto.randomBytes(16).toString('hex');
-                    try {
-                        if (subData.back_url) {
-                            const urlObj = new URL(subData.back_url);
-                            if (urlObj.searchParams.get("at")) magicToken = urlObj.searchParams.get("at");
-                        }
-                    } catch (e) {}
-
-                    // 3. SLUG DEFINITIVO
                     const realSlug = (datosSocio.business_name || "negocio")
                         .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
                         .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
-                    // 4. UPSERT EN SUPABASE (Desglose total)
+                    // 3. UPSERT EN SUPABASE (Desglose total)
                     const { error: upsertError } = await supabase.from('usuarios').upsert({
                         email: userEmail,
                         slug: realSlug,
                         business_name: datosSocio.business_name,
                         nombre_persona: datosSocio.nombre_persona,
-                        password: String(datosSocio.password || "auth-pago"),
+                        password: String(datosSocio.password || "auth-via-payment"),
                         precio: parseInt(datosSocio.precio) || 0,
                         duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
                         horarios: datosSocio.horarios || {},
                         telefono: datosSocio.telefono || null,
                         plan: 'premium',
                         tokens: 100000,
-                        access_token: magicToken,
+                        access_token: datosSocio.access_token || crypto.randomBytes(16).toString('hex'),
                         subscription_expiry: vencimiento.toISOString(),
                         sheet_id: MASTER_SHEET_ID,
                         metodo_pago: 'mercadopago'
@@ -317,7 +315,7 @@ app.post("/webhook", async (req, res) => {
                     if (upsertError) {
                         console.error("❌ Error Supabase:", upsertError.message);
                     } else {
-                        console.log(`✨ ¡Usuario ${realSlug} sincronizado con éxito!`);
+                        console.log(`✨ ¡Usuario Premium ${realSlug} creado/actualizado con éxito!`);
                         delete registrosTemporales[userEmail];
                         delete globalCache[realSlug];
                     }
