@@ -274,15 +274,20 @@ app.post("/webhook", async (req, res) => {
                         
                         const rows = rangeRes.data.values || [];
                         // Buscamos de abajo hacia arriba para obtener el registro más reciente de ese email
-                        const filaEncontrada = [...rows].reverse().find(row => row[0] === userEmail);
+                        // Aplicamos trim() y toLowerCase() a la celda del Excel para evitar fallos por espacios
+                        const filaEncontrada = [...rows].reverse().find(row => 
+                            row[0] && row[0].trim().toLowerCase() === userEmail
+                        );
                         
                         if (filaEncontrada && filaEncontrada[1]) {
                             try {
                                 datosSocio = JSON.parse(filaEncontrada[1]);
-                                console.log(`✅ Datos recuperados exitosamente desde Backup en Sheets.`);
+                                console.log(`✅ Datos de "${datosSocio.business_name}" recuperados exitosamente desde Sheets.`);
                             } catch (err) {
                                 console.error("❌ Error al parsear JSON desde Sheets:", err);
                             }
+                        } else {
+                            console.warn(`⚠️ No se encontró backup en Sheets para el email: ${userEmail}`);
                         }
                     }
 
@@ -315,14 +320,14 @@ app.post("/webhook", async (req, res) => {
 
                     console.log(`🚀 Sincronizando usuario Premium: ${realSlug}`);
 
-                    // 4. UPSERT EN SUPABASE
+                    // 4. UPSERT EN SUPABASE (Priorizando siempre datosSocio sobre los defaults)
                     const { error: upsertError } = await supabase.from('usuarios').upsert({
                         email: userEmail,
                         slug: realSlug,
                         business_name: datosSocio?.business_name || "Mi Negocio Premium",
                         nombre_persona: datosSocio?.nombre_persona || "Dueño Premium",
-                        precio: parseInt(datosSocio?.precio) || 0,
-                        duracion_turno: parseInt(datosSocio?.duracion_turno) || 30,
+                        precio: datosSocio?.precio ? parseInt(datosSocio.precio) : 0,
+                        duracion_turno: datosSocio?.duracion_turno ? parseInt(datosSocio.duracion_turno) : 30,
                         horarios: datosSocio?.horarios || {},
                         telefono: datosSocio?.telefono || null,
                         plan: 'premium',
@@ -337,7 +342,7 @@ app.post("/webhook", async (req, res) => {
                     if (upsertError) {
                         console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
                     } else {
-                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente!`);
+                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente con sus datos reales!`);
                         // Limpieza de datos temporales para liberar RAM
                         delete registrosTemporales[userEmail];
                         delete globalCache[realSlug];
