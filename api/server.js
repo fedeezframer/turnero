@@ -232,90 +232,97 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
-        if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
-            const subId = body.data?.id || body.id;
+// --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Actualizada y Robusta) ---
+if (body.type === "subscription_preapproval" || body.type === "subscription_authorized_payment") {
+    const subId = body.data?.id || body.id;
+    
+    if (subId) {
+        // Consultamos a MP para obtener los detalles reales de la suscripción
+        const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
+            headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
+        });
+        const subData = await response.json();
+
+        // Log para ver qué nos devuelve MP exactamente y no adivinar
+        console.log("🔍 Datos de suscripción recuperados de MP:", JSON.stringify(subData));
+
+        if (subData.status === "authorized" || subData.status === "active") {
+            // Intentamos sacar el mail de varios lugares posibles según la versión de la API
+            const rawEmail = subData.payer_email || (subData.payer && subData.payer.email) || "";
+            const userEmail = rawEmail.trim().toLowerCase();
             
-            if (subId) {
-                const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
-                    headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
-                });
-                const subData = await response.json();
+            if (!userEmail) {
+                console.error("❌ No se pudo extraer el email del pagador de la suscripción.");
+                return res.sendStatus(200);
+            }
 
-                if (subData.status === "authorized" || subData.status === "active") {
-                    const userEmail = (subData.payer_email || subData.payer?.email || "").trim().toLowerCase();
+            console.log(`📩 Buscando datos para activar: ${userEmail}`);
+            let datosSocio = registrosTemporales[userEmail];
+
+            // Si la RAM se limpió (reinicio de Render), buscamos en Google Sheets
+            if (!datosSocio) {
+                console.log(`☁️ RAM vacía. Buscando respaldo en Sheets para ${userEmail}...`);
+                try {
+                    const sheets = await getSheets();
+                    const sheetRes = await sheets.spreadsheets.values.get({
+                        spreadsheetId: MASTER_SHEET_ID,
+                        range: "Premium Temp!A:B"
+                    });
+                    const rows = sheetRes.data.values || [];
+                    // Buscamos de abajo hacia arriba (lo más reciente)
+                    const rowEncontrada = [...rows].reverse().find(r => r[0]?.toLowerCase() === userEmail);
                     
-                    if (!userEmail) return res.sendStatus(200);
-
-                    let datosSocio = registrosTemporales[userEmail];
-
-                    // Respaldo en Google Sheets si la RAM falló
-                    if (!datosSocio) {
-                        console.log(`☁️ Buscando respaldo en Sheets para ${userEmail}...`);
-                        const sheets = await getSheets();
-                        const sheetRes = await sheets.spreadsheets.values.get({
-                            spreadsheetId: MASTER_SHEET_ID,
-                            range: "Premium Temp!A:B"
-                        });
-                        const rows = sheetRes.data.values || [];
-                        const rowEncontrada = [...rows].reverse().find(r => r[0]?.toLowerCase() === userEmail);
-                        
-                        if (rowEncontrada) datosSocio = JSON.parse(rowEncontrada[1]);
+                    if (rowEncontrada) {
+                        datosSocio = JSON.parse(rowEncontrada[1]);
+                        console.log("✅ Datos recuperados exitosamente de Google Sheets.");
                     }
-
-                    if (datosSocio) {
-                        console.log(`✨ Procesando activación Premium para ${userEmail}`);
-
-                        // Preparar vencimiento (1 mes + 2 días de gracia)
-                        const vencimiento = new Date();
-                        vencimiento.setMonth(vencimiento.getMonth() + 1);
-                        vencimiento.setDate(vencimiento.getDate() + 2);
-
-                        const realSlug = (datosSocio.business_name || "negocio")
-                            .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-                            .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-                        // INSERTAR/ACTUALIZAR EN SUPABASE
-                        const { error: upsertError } = await supabase.from('usuarios').upsert({
-                            email: userEmail,
-                            slug: realSlug,
-                            business_name: datosSocio.business_name,
-                            nombre_persona: datosSocio.nombre_persona,
-                            password: String(datosSocio.password || "auth-pago"),
-                            precio: parseInt(datosSocio.precio) || 0,
-                            duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
-                            horarios: datosSocio.horarios || {},
-                            telefono: datosSocio.telefono || null,
-                            plan: 'premium',
-                            tokens: 100000,
-                            access_token: datosSocio.access_token || crypto.randomBytes(16).toString('hex'),
-                            subscription_expiry: vencimiento.toISOString(),
-                            sheet_id: MASTER_SHEET_ID,
-                            metodo_pago: 'mercadopago'
-                        }, { onConflict: 'email' });
-
-                        if (upsertError) {
-                            console.error("❌ Error Supabase:", upsertError.message);
-                        } else {
-                            console.log(`🚀 Usuario Premium ${realSlug} activado exitosamente.`);
-                            delete registrosTemporales[userEmail];
-                            delete globalCache[realSlug];
-                        }
-                    } else {
-                        console.warn(`⚠️ No se encontraron datos para el mail ${userEmail} en ninguna fuente.`);
-                    }
+                } catch (sheetError) {
+                    console.error("❌ Error al leer Google Sheets:", sheetError.message);
                 }
             }
+
+            if (datosSocio) {
+                // Generamos el slug del negocio
+                const realSlug = (datosSocio.business_name || "negocio")
+                    .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                    .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+                const vencimiento = new Date();
+                vencimiento.setMonth(vencimiento.getMonth() + 1);
+                vencimiento.setDate(vencimiento.getDate() + 2);
+
+                console.log(`🚀 Ejecutando Upsert en Supabase para: ${realSlug}`);
+
+                const { error: upsertError } = await supabase.from('usuarios').upsert({
+                    email: userEmail,
+                    slug: realSlug,
+                    business_name: datosSocio.business_name,
+                    nombre_persona: datosSocio.nombre_persona,
+                    password: String(datosSocio.password || "auth-pago"),
+                    precio: parseInt(datosSocio.precio) || 0,
+                    duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
+                    horarios: datosSocio.horarios || {},
+                    telefono: datosSocio.telefono || null,
+                    plan: 'premium',
+                    tokens: 100000,
+                    access_token: datosSocio.access_token || null, // Usamos el Magic Token que generamos en create-subscription
+                    subscription_expiry: vencimiento.toISOString(),
+                    sheet_id: MASTER_SHEET_ID,
+                    metodo_pago: 'mercadopago'
+                }, { onConflict: 'email' });
+
+                if (upsertError) {
+                    console.error("❌ Error Supabase al activar Premium:", upsertError.message);
+                } else {
+                    console.log(`✨ ¡USUARIO PREMIUM ACTIVADO! Slug: ${realSlug}`);
+                    delete registrosTemporales[userEmail];
+                }
+            } else {
+                console.warn(`⚠️ No hay datos temporales (RAM/Sheets) para ${userEmail}. El pago se procesó pero no sabemos qué negocio activar.`);
+            }
         }
-
-        // MUY IMPORTANTE: Responder 200 siempre al final del bloque try
-        res.sendStatus(200);
-
-    } catch (e) {
-        console.error("❌ Error crítico Webhook:", e.message);
-        res.sendStatus(200); // Respondemos 200 igual para que MP no sature el server con reintentos
     }
-});
+}
 
 app.post("/api/pre-register-premium", async (req, res) => {
     // Desestructuramos todos los campos necesarios que vienen desde el DataGuardian de Framer
