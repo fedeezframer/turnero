@@ -213,7 +213,7 @@ app.post("/webhook", async (req, res) => {
                 if (paymentData.status === "approved" && paymentData.metadata) {
                     const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
-                    // Usamos la limpieza oficial de slug para evitar errores de matching
+                    // Limpieza de slug para asegurar coincidencia
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
                     
                     const partes = fecha.split("-");
@@ -246,7 +246,7 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Registro/Renovación) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Registro/Renovación con Backup en Sheets) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             
@@ -256,43 +256,66 @@ app.post("/webhook", async (req, res) => {
                 });
                 const subData = await response.json();
 
-                // Solo procesamos si está activo o autorizado
+                // Solo procesamos si el pago está aprobado (authorized o active)
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
-                    console.log(`💳 Procesando suscripción Premium para: ${userEmail}`);
+                    console.log(`💳 Confirmado pago Premium para: ${userEmail}`);
 
-                    // Intentamos recuperar los datos del Guardián (Framer)
-                    const datosSocio = registrosTemporales[userEmail];
-                    
-                    // Calculamos vencimiento (1 mes + 2 días de gracia)
-                    const nuevaFechaVencimiento = new Date();
-                    nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
-                    nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
+                    // 1. RECUPERACIÓN DE DATOS (Primero RAM, si falla busca en Sheets)
+                    let datosSocio = registrosTemporales[userEmail];
 
-                    // Recuperamos el Magic Token que enviamos en la back_url original si es posible
-                    let magicToken = "session_" + crypto.randomBytes(8).toString('hex');
-                    try {
-                        const urlObj = new URL(subData.back_url);
-                        if (urlObj.searchParams.get("at")) {
-                            magicToken = urlObj.searchParams.get("at");
+                    if (!datosSocio) {
+                        console.log(`⚠️ RAM vacía para ${userEmail}. Buscando en hoja "Premium Temp"...`);
+                        const sheets = await getSheets();
+                        const rangeRes = await sheets.spreadsheets.values.get({
+                            spreadsheetId: MASTER_SHEET_ID,
+                            range: "Premium Temp!A:B"
+                        });
+                        
+                        const rows = rangeRes.data.values || [];
+                        // Buscamos de abajo hacia arriba para obtener el registro más reciente de ese email
+                        const filaEncontrada = [...rows].reverse().find(row => row[0] === userEmail);
+                        
+                        if (filaEncontrada && filaEncontrada[1]) {
+                            try {
+                                datosSocio = JSON.parse(filaEncontrada[1]);
+                                console.log(`✅ Datos recuperados exitosamente desde Backup en Sheets.`);
+                            } catch (err) {
+                                console.error("❌ Error al parsear JSON desde Sheets:", err);
+                            }
                         }
-                    } catch (e) {
-                        console.log("No se pudo extraer token de back_url, usando uno genérico.");
                     }
 
-                    // Definimos el slug basándonos en el nombre del negocio (si existe) o el email
+                    // 2. CONFIGURACIÓN DE TIEMPOS Y TOKEN DE SESIÓN
+                    const nuevaFechaVencimiento = new Date();
+                    nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
+                    nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2); // 2 días de gracia
+
+                    let magicToken = datosSocio?.access_token || "session_" + crypto.randomBytes(8).toString('hex');
+                    try {
+                        if (subData.back_url) {
+                            const urlObj = new URL(subData.back_url);
+                            if (urlObj.searchParams.get("at")) {
+                                magicToken = urlObj.searchParams.get("at");
+                            }
+                        }
+                    } catch (e) {
+                        console.log("No se pudo extraer token de back_url.");
+                    }
+
+                    // 3. GENERACIÓN DE SLUG DEFINITIVO (Sin acentos ni caracteres raros)
                     const nombreBase = datosSocio?.business_name || userEmail.split('@')[0];
                     const realSlug = nombreBase
                         .toLowerCase()
                         .trim()
                         .normalize("NFD")
-                        .replace(/[\u0300-\u036f]/g, "")
+                        .replace(/[\u0300-\u036f]/g, "") // Quita acentos
                         .replace(/\s+/g, '-')
                         .replace(/[^a-z0-9-]/g, '');
 
-                    console.log(`🚀 Ejecutando UPSERT para asegurar creación de usuario: ${realSlug}`);
+                    console.log(`🚀 Sincronizando usuario Premium: ${realSlug}`);
 
-                    // UPSERT: Si el email existe, actualiza. Si no, crea.
+                    // 4. UPSERT EN SUPABASE
                     const { error: upsertError } = await supabase.from('usuarios').upsert({
                         email: userEmail,
                         slug: realSlug,
@@ -307,15 +330,15 @@ app.post("/webhook", async (req, res) => {
                         access_token: magicToken,
                         subscription_expiry: nuevaFechaVencimiento.toISOString(),
                         password: datosSocio?.password || "auth-via-payment",
-                        sheet_id: MASTER_SHEET_ID, // Mantenemos el sheet en común
+                        sheet_id: MASTER_SHEET_ID,
                         metodo_pago: 'mercadopago'
                     }, { onConflict: 'email' });
 
                     if (upsertError) {
                         console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
                     } else {
-                        console.log(`✨ Usuario Premium ${realSlug} sincronizado correctamente en Supabase.`);
-                        // Limpieza de memoria temporal
+                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente!`);
+                        // Limpieza de datos temporales para liberar RAM
                         delete registrosTemporales[userEmail];
                         delete globalCache[realSlug];
                     }
@@ -323,12 +346,11 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // Siempre responder 200 a Mercado Pago inmediatamente
+        // Siempre responder 200 a Mercado Pago para evitar reintentos infinitos
         res.sendStatus(200);
 
     } catch (e) {
         console.error("❌ Error crítico dentro del Webhook:", e.message);
-        // Respondemos 200 igual para que MP no nos sature con reintentos si el error es de lógica
         res.sendStatus(200);
     }
 });
