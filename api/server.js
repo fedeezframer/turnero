@@ -340,10 +340,10 @@ app.post("/api/pre-register-premium", async (req, res) => {
 
     try {
         // 1. PERSISTENCIA EN MEMORIA (Para acceso rápido del Webhook)
-        // Verificamos si ya existe algo (como el access_token generado en create-subscription)
+        // Verificamos si ya existe algo (como el access_token generado previamente en create-subscription)
         const registroExistente = registrosTemporales[emailKey] || {};
 
-        registrosTemporales[emailKey] = {
+        const nuevosDatos = {
             ...registroExistente,
             business_name: business_name || registroExistente.business_name,
             nombre_persona: nombre_persona || registroExistente.nombre_persona,
@@ -353,23 +353,29 @@ app.post("/api/pre-register-premium", async (req, res) => {
             telefono: telefono || registroExistente.telefono,
             plan: plan || 'premium',
             password: password || registroExistente.password,
+            // Importante: preservamos el access_token si ya existe en RAM
+            access_token: registroExistente.access_token || null,
             timestamp: Date.now()
         };
+
+        registrosTemporales[emailKey] = nuevosDatos;
 
         // 2. PERSISTENCIA EN GOOGLE SHEETS (Respaldo contra reinicios del servidor)
         const sheets = await getSheets();
         const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
-        // Convertimos el objeto a string para guardarlo en una sola celda como JSON
+        // Convertimos el objeto completo a string para guardarlo en una sola celda como JSON.
+        // Incluimos el access_token en el JSON para que el backup sea 100% funcional.
         const datosBackup = JSON.stringify({
-            business_name,
-            nombre_persona,
-            precio: parseInt(precio) || 0,
-            duracion_turno: parseInt(duracion_turno) || 30,
-            horarios,
-            telefono,
-            plan: plan || 'premium',
-            password: password || "auth-via-payment"
+            business_name: nuevosDatos.business_name,
+            nombre_persona: nuevosDatos.nombre_persona,
+            precio: parseInt(nuevosDatos.precio) || 0,
+            duracion_turno: parseInt(nuevosDatos.duracion_turno) || 30,
+            horarios: nuevosDatos.horarios,
+            telefono: nuevosDatos.telefono,
+            plan: nuevosDatos.plan,
+            password: nuevosDatos.password,
+            access_token: nuevosDatos.access_token // <--- Backup del token técnico
         });
 
         // Guardamos en la pestaña "Premium Temp"
@@ -384,7 +390,7 @@ app.post("/api/pre-register-premium", async (req, res) => {
         });
 
         console.log(`✅ Registro Temporal completado para: ${emailKey}`);
-        console.log(`📦 Datos guardados en RAM y en hoja "Premium Temp"`);
+        console.log(`📦 Datos guardados en RAM y en hoja "Premium Temp" (con backup de token)`);
 
         res.json({ 
             success: true, 
@@ -393,8 +399,18 @@ app.post("/api/pre-register-premium", async (req, res) => {
 
     } catch (e) {
         console.error("❌ Error crítico en pre-register-premium:", e.message);
-        // Aunque falle Sheets, intentamos responder success si se guardó en RAM 
-        // para no trabar al usuario, pero avisamos en consola.
+        
+        // Si falló Sheets pero se guardó en RAM, dejamos que el usuario siga para no trabar la venta,
+        // pero tiramos un warning en consola.
+        if (registrosTemporales[emailKey]) {
+            console.warn("⚠️ Falló el backup en Sheets, pero los datos están en RAM. Continuando...");
+            return res.json({ 
+                success: true, 
+                warning: "Backup en la nube fallido, pero sesión activa.",
+                message: "Procediendo al flujo de pago." 
+            });
+        }
+
         res.status(500).json({ 
             error: "Error interno al procesar el backup de datos.",
             details: e.message 
