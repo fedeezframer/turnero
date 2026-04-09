@@ -205,50 +205,59 @@ app.post("/webhook", async (req, res) => {
         // --- A. LÓGICA PARA PAGOS DE TURNOS INDIVIDUALES (SEÑAS/TOTALES) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
+            
             if (paymentId) {
                 const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const paymentData = await paymentResponse.json();
 
-                // Verificamos que el pago esté aprobado y tenga la metadata
-                if (paymentData.status === "approved" && paymentData.metadata) {
+                // Verificamos que el pago esté aprobado y tenga metadata de turno
+                // El chequeo 'paymentData.metadata?.slug' es vital para no romper el código con pagos premium
+                if (paymentData.status === "approved" && paymentData.metadata && paymentData.metadata.slug) {
                     const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
-                    // Limpieza de slug
+                    // Limpieza segura de slug para evitar errores de formato
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
                     
-                    // Formateo de fecha para Google Sheets
-                    const partes = fecha.split("-"); // YYYY-MM-DD
+                    // Formateo de fecha para Google Sheets (DD/MM - HH:mm)
+                    const partes = fecha.split("-"); // Asumiendo YYYY-MM-DD
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                     const sheets = await getSheets();
                     
-                    // Guardamos el turno en la planilla
+                    // Guardamos el turno en la planilla de Google
                     await sheets.spreadsheets.values.append({
                         spreadsheetId: MASTER_SHEET_ID,
                         range: "A:E",
                         valueInputOption: "RAW",
                         requestBody: { 
-                            values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] 
+                            values: [[
+                                nombre ? nombre.trim() : "Cliente", 
+                                telefono ? telefono.toString().trim() : "N/A", 
+                                textoTurnoNuevo, 
+                                fechaHoyReal, 
+                                slug
+                            ]] 
                         }
                     });
 
-                    // Descontamos el token
+                    // Descontamos el token del plan gratuito (si corresponde)
                     if (typeof handleTokenDiscount === 'function') {
                         await handleTokenDiscount(slug);
                     }
                     
-                    // Limpieza de caché
+                    // Limpieza de caché para que los datos nuevos se vean reflejados
                     delete globalCache[slug];
                     console.log(`✅ Turno agendado exitosamente para el negocio: ${slug}`);
+                } else {
+                    console.log("ℹ️ Pago recibido sin metadata de turno. Se ignora (posible cobro de suscripción).");
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (ACTIVACIÓN DE CUENTA) ---
-        // Escuchamos la creación y los pagos mensuales automáticos
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (ACTIVACIÓN POR SLUG) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized_payment") {
             const subId = body.data?.id || body.id;
             
@@ -261,63 +270,67 @@ app.post("/webhook", async (req, res) => {
 
                 console.log("🔍 Detalles de suscripción recuperados:", JSON.stringify(subData));
 
-                // Si el pago está autorizado o activo, procedemos a activar en Supabase
+                // Si el pago está autorizado o activo, procedemos a activar
                 if (subData.status === "authorized" || subData.status === "active") {
                     
-                    const rawEmail = subData.payer_email || (subData.payer && subData.payer.email) || "";
-                    const userEmail = rawEmail.trim().toLowerCase();
+                    // PRIORIDAD 1: Usamos el external_reference (donde ahora enviamos el slug)
+                    // PRIORIDAD 2: Buscamos el slug en la back_url como respaldo
+                    let slugParaActivar = subData.external_reference;
+
+                    if (!slugParaActivar && subData.back_url) {
+                        const urlParams = new URLSearchParams(subData.back_url.split('?')[1]);
+                        slugParaActivar = urlParams.get('u');
+                    }
                     
-                    if (!userEmail) {
-                        console.error("❌ Error: No se pudo obtener el email del pagador desde la suscripción.");
-                        return res.sendStatus(200);
+                    if (!slugParaActivar) {
+                        console.error("❌ Error: No se pudo obtener el slug del negocio (external_reference vacío).");
+                        return res.sendStatus(200); 
                     }
 
-                    console.log(`🚀 Activando Plan Premium para: ${userEmail}`);
+                    console.log(`🚀 Activando Plan Premium para el slug: ${slugParaActivar}`);
 
-                    // Calculamos el vencimiento (1 mes + 2 días de gracia)
+                    // Calculamos el vencimiento (1 mes + 2 días de gracia para evitar cortes bruscos)
                     const vencimiento = new Date();
                     vencimiento.setMonth(vencimiento.getMonth() + 1);
                     vencimiento.setDate(vencimiento.getDate() + 2);
 
-                    // ACTUALIZACIÓN DIRECTA EN SUPABASE
-                    // Ya no creamos el usuario, solo actualizamos su plan de 'pendiente' a 'premium'
+                    // ACTUALIZACIÓN EN SUPABASE USANDO EL SLUG
                     const { data, error: updateError } = await supabase
                         .from('usuarios')
                         .update({
                             plan: 'premium',
-                            tokens: 100000, // Tokens ilimitados para premium
+                            tokens: 100000, 
                             subscription_expiry: vencimiento.toISOString(),
                             metodo_pago: 'mercadopago'
                         })
-                        .eq('email', userEmail)
+                        .eq('slug', slugParaActivar)
                         .select();
 
                     if (updateError) {
                         console.error("❌ Error al activar premium en Supabase:", updateError.message);
                     } else if (data && data.length > 0) {
                         console.log(`✨ ¡CUENTA ACTIVADA! El negocio ${data[0].business_name} ya es Premium.`);
-                        
-                        // Limpiamos caché por si acaso estaba guardado como pendiente
-                        delete globalCache[data[0].slug];
+                        delete globalCache[slugParaActivar];
                     } else {
-                        console.warn(`⚠️ Se recibió pago de ${userEmail} pero el usuario no existe en la DB.`);
+                        console.warn(`⚠️ Se recibió pago para el slug ${slugParaActivar} pero no existe en la DB.`);
                     }
 
-                    // Limpieza de seguridad en registrosTemporales (si existiera algo)
-                    if (registrosTemporales[userEmail]) {
-                        delete registrosTemporales[userEmail];
+                    // Limpieza de seguridad en registros temporales (si usas el email como clave ahí)
+                    const rawEmail = subData.payer_email || (subData.payer && subData.payer.email);
+                    if (rawEmail && typeof registrosTemporales !== 'undefined') {
+                        delete registrosTemporales[rawEmail.toLowerCase().trim()];
                     }
                 }
             }
         }
 
-        // Siempre respondemos 200 a Mercado Pago
+        // Siempre respondemos 200 a Mercado Pago para frenar los reintentos
         res.sendStatus(200);
 
     } catch (e) {
         console.error("🔥 Error crítico en el Webhook:", e.message);
-        // Respondemos 500 solo en errores catastróficos, pero MP reintentará
-        res.status(500).send("Internal Server Error");
+        // Respondemos 200 de todas formas para evitar que MP nos sature a reintentos fallidos
+        res.sendStatus(200);
     }
 });
 
@@ -335,7 +348,7 @@ app.post("/api/pre-register-premium", async (req, res) => {
         password 
     } = req.body;
     
-    // Validación de seguridad básica
+    // Validación de seguridad básica: No permitimos registros sin los pilares fundamentales
     if (!email || !business_name || !password) {
         return res.status(400).json({ error: "Faltan datos obligatorios para iniciar el registro." });
     }
@@ -345,18 +358,20 @@ app.post("/api/pre-register-premium", async (req, res) => {
     try {
         console.log(`🆕 Iniciando pre-registro Premium para: ${emailKey}`);
 
-        // 2. Generación del Slug (URL amigable)
+        // 2. Generación del Slug (URL amigable y único identificador del negocio)
+        // Eliminamos acentos, caracteres especiales y convertimos espacios en guiones
         const realSlug = (business_name || "mi-negocio")
             .toLowerCase()
             .trim()
             .normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "") // Quita acentos
             .replace(/\s+/g, '-')             // Espacios por guiones
-            .replace(/[^a-z0-9-]/g, '');      // Quita caracteres especiales
+            .replace(/[^a-z0-9-]/g, '');      // Quita caracteres especiales (deja solo a-z, 0-9 y -)
 
         // 3. PERSISTENCIA DIRECTA EN SUPABASE
-        // Insertamos al usuario con plan 'pendiente'. 
-        // Si el usuario ya existe (por un intento previo), actualizamos sus datos (upsert).
+        // Insertamos al usuario con estado 'pendiente'.
+        // Usamos 'upsert' con 'onConflict: email' para que si el usuario reintenta, 
+        // se actualicen sus preferencias sin crear un duplicado roto.
         const { error: upsertError } = await supabase
             .from('usuarios')
             .upsert({
@@ -364,13 +379,13 @@ app.post("/api/pre-register-premium", async (req, res) => {
                 slug: realSlug,
                 business_name: business_name.trim(),
                 nombre_persona: nombre_persona ? nombre_persona.trim() : null,
-                password: String(password), // Guardamos la pass elegida
+                password: String(password), 
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {},
                 telefono: telefono || null,
-                plan: 'pendiente', // <--- IMPORTANTE: No puede entrar hasta que pague
-                tokens: 0,         // Sin tokens hasta que se active
+                plan: 'pendiente', // <--- Se activará a 'premium' mediante el Webhook tras el pago
+                tokens: 0,         // El plan premium otorga tokens ilimitados (lógica en Webhook)
                 sheet_id: MASTER_SHEET_ID,
                 created_at: new Date().toISOString()
             }, { onConflict: 'email' });
@@ -380,7 +395,8 @@ app.post("/api/pre-register-premium", async (req, res) => {
             throw new Error("No se pudo guardar la información del negocio en la base de datos.");
         }
 
-        // 4. OPCIONAL: Respaldo en Google Sheets (Solo por auditoría, ya no es crítico)
+        // 4. LOG DE AUDITORÍA EN GOOGLE SHEETS (Opcional/Respaldo)
+        // Registramos el intento en una hoja separada para control administrativo
         try {
             const sheets = await getSheets();
             const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
@@ -390,25 +406,27 @@ app.post("/api/pre-register-premium", async (req, res) => {
                 range: "Premium Temp!A:C",
                 valueInputOption: "RAW",
                 requestBody: { 
-                    values: [[emailKey, `Registro pendiente: ${business_name}`, fechaHoy]] 
+                    values: [[emailKey, `Registro iniciado para: ${business_name}`, fechaHoy]] 
                 }
             });
         } catch (sheetError) {
-            console.warn("⚠️ No se pudo guardar el log en Sheets, pero el usuario ya está en Supabase.");
+            // No bloqueamos el proceso si falla Sheets, ya que Supabase es nuestra fuente de verdad
+            console.warn("⚠️ No se pudo guardar el log en Sheets, pero el registro en Supabase fue exitoso.");
         }
 
         console.log(`✅ Pre-registro completado en DB para: ${emailKey} con slug: ${realSlug}`);
 
+        // 5. Respuesta exitosa al frontend para disparar el flujo de Mercado Pago
         res.json({ 
             success: true, 
-            message: "Datos guardados. Redirigiendo a Mercado Pago.",
+            message: "Datos de negocio guardados correctamente.",
             slug: realSlug
         });
 
     } catch (e) {
         console.error("🔥 Error crítico en pre-register-premium:", e.message);
         res.status(500).json({ 
-            error: "Error interno al procesar el pre-registro.",
+            error: "Error interno al procesar el pre-registro del negocio.",
             details: e.message 
         });
     }
@@ -662,7 +680,7 @@ app.post("/api/verify-and-register", async (req, res) => {
             telefono 
         } = req.body;
         
-        // 1. Validar el código con Google Apps Script
+        // 1. Validar el código de verificación con Google Apps Script
         const googleRes = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
@@ -676,74 +694,83 @@ app.post("/api/verify-and-register", async (req, res) => {
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            // 2. Generar Slug limpio a partir del nombre del negocio
+            // 2. Generación de Slug (Identificador único de URL)
+            // Priorizamos el nombre enviado, si no, usamos el que viene del registro de Google
             const finalName = business_name || result.usuario || "Negocio";
             const cleanSlug = finalName
                 .toLowerCase()
                 .trim()
                 .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "") // Quita acentos
-                .replace(/\s+/g, '-')           // Espacios por guiones
-                .replace(/[^a-z0-9-]/g, '');    // Quita caracteres raros
-            
+                .replace(/[\u0300-\u036f]/g, "") // Elimina acentos
+                .replace(/\s+/g, '-')            // Espacios por guiones
+                .replace(/[^a-z0-9-]/g, '');     // Elimina caracteres especiales
+
             // 3. Lógica de Plan y Vencimiento Inicial
             const isPremium = plan === 'premium';
             let fechaVencimientoInicial = null;
             
             if (isPremium) {
-                // Le damos 24 horas de gracia inicial para que entre al dashboard
+                // Para registros premium vía código (ej. promos manuales), 
+                // damos 30 días de acceso directo.
                 const ahora = new Date();
-                ahora.setHours(ahora.getHours() + 24); 
+                ahora.setMonth(ahora.getMonth() + 1); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
 
-            // --- NUEVO: GENERACIÓN DE MAGIC TOKEN PARA LOGIN AUTOMÁTICO ---
+            // --- GENERACIÓN DE MAGIC TOKEN PARA LOGIN AUTOMÁTICO ---
+            // Este token permitirá que el usuario entre al Dashboard sin loguearse manualmente la primera vez
             const magicToken = crypto.randomBytes(16).toString('hex');
 
             // 4. Insertar en la tabla de Usuarios de Supabase
+            // Usamos el Slug como identificador principal para el acceso
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
-                nombre_persona: nombre_persona || "Dueño",
-                business_name: finalName,
-                password: String(result.password),
+                nombre_persona: nombre_persona ? nombre_persona.trim() : "Dueño",
+                business_name: finalName.trim(),
+                password: String(result.password), // Contraseña generada en el paso anterior
                 sheet_id: MASTER_SHEET_ID,
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {},
                 plan: isPremium ? 'premium' : 'gratis',
-                tokens: isPremium ? 100000 : 50,
+                tokens: isPremium ? 100000 : 50, // 50 tokens iniciales para el plan gratis
                 telefono: telefono || null,
-                metodo_pago: 'none',
+                metodo_pago: isPremium ? 'manual' : 'none',
                 subscription_expiry: fechaVencimientoInicial,
                 excepciones: [],
                 mp_access_token: null,
-                access_token: magicToken // <--- GUARDAMOS EL TOKEN EN LA DB
+                access_token: magicToken // <--- Token para validación de sesión inmediata
             }]);
 
             if (error) {
+                // Manejo de error si el Slug (URL) ya está tomado
                 if (error.code === '23505') {
-                    return res.status(400).json({ error: "Este nombre de negocio ya está registrado. Probá con uno similar." });
+                    console.warn(`⚠️ Intento de registro duplicado para slug: ${cleanSlug}`);
+                    return res.status(400).json({ 
+                        error: "El nombre de este negocio ya está registrado o su URL no está disponible. Intentá con uno ligeramente distinto." 
+                    });
                 }
                 throw error;
             }
 
-            // 5. Respuesta exitosa incluyendo el TOKEN para el frontend
-            console.log(`✨ Nuevo usuario registrado: ${cleanSlug}. Magic Token generado.`);
+            // 5. Respuesta exitosa incluyendo el TOKEN para la redirección desde Framer
+            console.log(`✨ Nuevo usuario registrado exitosamente: ${cleanSlug} (${email})`);
             
             res.json({ 
                 success: true, 
                 slug: cleanSlug,
-                at: magicToken, // <--- AHORA EL FRONTEND RECIBE EL TOKEN REAL
-                message: "Cuenta verificada y creada con éxito."
+                at: magicToken, // El frontend recibe esto y lo usa en la URL de redirección (?u=slug&at=token)
+                message: "¡Cuenta creada con éxito! Redirigiendo al panel..."
             });
 
         } else {
-            res.status(400).json({ error: "El código de verificación no es válido o ya expiró." });
+            // Caso en que el código de email sea incorrecto
+            res.status(400).json({ error: "El código de verificación es incorrecto o ha expirado." });
         }
     } catch (e) { 
-        console.error("❌ Error crítico en el proceso de registro:", e.message);
-        res.status(500).json({ error: "Hubo un problema al crear tu cuenta." }); 
+        console.error("❌ Error crítico en el proceso de registro final:", e.message);
+        res.status(500).json({ error: "No se pudo completar el registro. Por favor, intentá nuevamente." }); 
     }
 });
 
@@ -1041,11 +1068,10 @@ app.post("/cancel-appointment", async (req, res) => {
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get("/verify-session", async (req, res) => {
     try {
         const rawU = req.query.u;
-        // Capturamos el Magic Token que viene en la URL como 'at' (access token)
+        // Capturamos el Magic Token que viene en la URL como 'at'
         const magicToken = req.query.at; 
 
         if (!rawU) {
@@ -1053,16 +1079,16 @@ app.get("/verify-session", async (req, res) => {
             return res.json({ active: false, reason: "no_slug" });
         }
 
-        // Limpiamos el slug recibido para evitar errores de formato
+        // 1. Limpieza del slug (Identificador Único)
         const slug = rawU.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
         
         console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
 
-        // Consultamos la base de datos buscando al usuario por su slug
+        // 2. Consultamos la base de datos buscando al usuario por su slug
         // Traemos plan, vencimiento, tokens y el magic token guardado
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('slug, plan, subscription_expiry, access_token, tokens')
+            .select('slug, plan, subscription_expiry, access_token, tokens, business_name')
             .eq('slug', slug)
             .single();
 
@@ -1076,41 +1102,42 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- 1. LÓGICA DE MAGIC LOGIN (Entrada Directa Post-Pago) ---
-        // Si el usuario viene redirigido de MP con el token correcto...
+        // --- 3. LÓGICA DE MAGIC LOGIN (Entrada Directa Post-Pago/Registro) ---
+        // Si el usuario trae el token correcto, le damos paso libre inmediato
         if (magicToken && user.access_token === magicToken) {
-            console.log(`✨ Magic Login detectado para: ${slug}. Validando acceso...`);
+            console.log(`✨ Magic Login detectado para: ${slug}.`);
             
-            // Seguridad: Borramos el token de la DB para que el link no pueda ser usado otra vez
+            // Seguridad: Borramos el token para que el link no sea reutilizable infinitamente
             await supabase
                 .from('usuarios')
                 .update({ access_token: null })
                 .eq('slug', slug);
             
-            // Si el plan es 'pendiente', lo tratamos como activo temporalmente 
-            // porque el Webhook podría tardar unos segundos más que la redirección.
+            // Si el plan figura como 'pendiente', visualmente le mostramos 'premium'
+            // ya que si tiene el magicToken es porque acaba de completar el flujo de pago
             const planFinal = user.plan === 'pendiente' ? 'premium' : user.plan;
 
             return res.json({ 
                 active: true, 
                 slug: user.slug, 
                 plan: planFinal,
+                business_name: user.business_name,
                 magicLogin: true 
             });
         }
 
-        // --- 2. LÓGICA DE BLOQUEO POR ESTADO 'PENDIENTE' ---
-        // Si no hay magic token y el plan sigue en pendiente, no puede pasar
+        // --- 4. LÓGICA DE BLOQUEO POR ESTADO 'PENDIENTE' ---
+        // Si no hay magic token y el Webhook aún no impactó, lo frenamos amablemente
         if (user.plan === 'pendiente') {
-            console.log(`⏳ El usuario ${slug} intentó entrar pero su pago aún procesa.`);
+            console.log(`⏳ El usuario ${slug} está en espera de confirmación de pago.`);
             return res.status(402).json({
                 active: false,
                 reason: "payment_pending",
-                msg: "Tu pago se está procesando. Reintenta en unos instantes."
+                msg: "Tu suscripción se está procesando. Reintentá en 10 segundos."
             });
         }
 
-        // --- 3. LÓGICA DE BLOQUEO POR VENCIMIENTO O TOKENS (402) ---
+        // --- 5. LÓGICA DE BLOQUEO POR VENCIMIENTO O TOKENS ---
 
         // CASO A: Usuario Premium con suscripción vencida
         if (user.plan === 'premium') {
@@ -1126,8 +1153,6 @@ app.get("/verify-session", async (req, res) => {
                         expiry: user.subscription_expiry 
                     });
                 }
-            } else {
-                console.log(`⚠️ Usuario ${slug} es premium sin fecha de vencimiento explícita. Acceso permitido.`);
             }
         }
 
@@ -1143,13 +1168,14 @@ app.get("/verify-session", async (req, res) => {
             }
         }
 
-        // --- 4. ACCESO CONCEDIDO (Sesión Normal) ---
+        // --- 6. ACCESO CONCEDIDO (Sesión Normal) ---
         console.log(`✅ Sesión confirmada: ${slug} (Plan: ${user.plan})`);
         res.json({ 
             active: true, 
             slug: user.slug, 
             plan: user.plan,
-            tokens: user.tokens
+            tokens: user.tokens,
+            business_name: user.business_name
         });
 
     } catch (e) { 
