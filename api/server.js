@@ -199,7 +199,9 @@ app.post("/webhook", async (req, res) => {
     const { query, body } = req;
 
     try {
-        // --- A. LÓGICA PARA PAGOS DE TURNOS ---
+        console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
+
+        // --- A. LÓGICA PARA PAGOS DE TURNOS (Venta única) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -224,49 +226,50 @@ app.post("/webhook", async (req, res) => {
                         }
                     });
 
-                    // handleTokenDiscount es una función interna tuya para descontar tokens
                     if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
                     delete globalCache[slug];
-                    console.log(`✅ Turno agendado para: ${slug}`);
+                    console.log(`✅ Turno agendado exitosamente para el negocio: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Socios) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Suscripciones recurrentes) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
+            console.log(`💳 Procesando notificación de suscripción ID: ${subId}`);
+            
             if (subId) {
                 const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const subData = await response.json();
 
+                // Verificamos que la suscripción esté activa o autorizada
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
-                    
-                    // Capturamos el Magic Token que pusimos en la back_url al crear la suscripción
+                    console.log(`✅ Pago de suscripción verificado para el email: ${userEmail}`);
+
                     const urlObj = new URL(subData.back_url);
                     const accessToken = urlObj.searchParams.get("at"); 
                     const urlSlug = urlObj.searchParams.get("u");
 
+                    // Calculamos vencimiento (1 mes + 2 días de gracia)
                     const nuevaFechaVencimiento = new Date();
                     nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
                     nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2);
 
-                    // 1. Intentamos rescatar los datos reales del socio desde nuestra memoria temporal
+                    // Intentamos recuperar los datos del registro previo en memoria
                     const datosSocio = registrosTemporales[userEmail];
 
                     if (datosSocio) {
-                        console.log(`🚀 Rescatando datos reales para ${userEmail} desde memoria.`);
+                        console.log(`🚀 Datos encontrados en memoria. Creando/Actualizando usuario Premium...`);
                         
-                        // Generamos el slug real basado en su nombre de negocio
                         const realSlug = datosSocio.business_name
                             .toLowerCase()
                             .trim()
                             .replace(/\s+/g, '-')
                             .replace(/[^a-z0-9-]/g, '');
 
-                        // Upsert: Si existe actualiza, si no inserta
                         const { error: upsertError } = await supabase.from('usuarios').upsert({
                             email: userEmail,
                             slug: realSlug,
@@ -280,21 +283,24 @@ app.post("/webhook", async (req, res) => {
                             tokens: 100000,
                             access_token: accessToken,
                             subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                            password: "auth-via-payment",
+                            password: datosSocio.password || "auth-via-payment",
                             sheet_id: MASTER_SHEET_ID
                         }, { onConflict: 'email' });
 
-                        if (upsertError) console.error("Error al guardar socio Premium:", upsertError);
+                        if (upsertError) {
+                            console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
+                        } else {
+                            console.log(`✨ Usuario Premium ${realSlug} guardado correctamente.`);
+                        }
 
-                        // Borramos de la memoria para limpiar el server
+                        // Limpieza de datos temporales
                         delete registrosTemporales[userEmail];
                         if (realSlug) delete globalCache[realSlug];
                         
                     } else {
-                        // CASO FALLBACK: Si no hay datos en memoria (ej. server reiniciado)
-                        console.log(`⚠️ No hay datos en memoria para ${userEmail}. Usando fallback básico.`);
-                        const fallbackSlug = urlSlug || userEmail.split('@')[0].replace(/[^a-z0-9]/g, "");
-
+                        // Caso donde los datos no están en memoria (ej: reinicio de server)
+                        console.log(`⚠️ Advertencia: No hay datos en registrosTemporales para ${userEmail}. Aplicando actualización de emergencia.`);
+                        
                         await supabase.from('usuarios').update({ 
                             plan: 'premium', 
                             tokens: 100000, 
@@ -306,10 +312,11 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
+        // Siempre responder 200 a Mercado Pago para evitar reintentos infinitos
         res.sendStatus(200);
 
     } catch (e) {
-        console.error("❌ Error en Webhook:", e.message);
+        console.error("❌ Error crítico dentro del Webhook:", e.message);
         res.sendStatus(200);
     }
 });
@@ -339,18 +346,25 @@ app.post("/api/create-subscription", async (req, res) => {
     try {
         const { email } = req.body;
 
+        // Validación de entrada
         if (!email) {
-            return res.status(400).json({ error: "El email es obligatorio para generar la suscripción." });
+            return res.status(400).json({ 
+                error: "El email es obligatorio para generar la suscripción." 
+            });
         }
 
+        const userEmailLimpio = email.toLowerCase().trim();
+
         // 1. Generamos el slug a partir del email para la vuelta al dashboard
-        const userSlug = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        // Esto sirve como identificador visual en la URL de regreso
+        const userSlug = userEmailLimpio.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
         // 2. Generamos un Magic Token aleatorio y seguro de 32 caracteres (hexadecimal)
-        // Esto servirá como "llave" temporal para el login automático sin contraseña
+        // Este token se envía en la back_url y se guarda en Supabase vía Webhook para validar la sesión inicial
         const magicToken = crypto.randomBytes(16).toString('hex');
 
         // 3. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
+        // Usamos fetch para tener control total sobre los headers y el cuerpo de la petición
         const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
@@ -359,15 +373,15 @@ app.post("/api/create-subscription", async (req, res) => {
             },
             body: JSON.stringify({
                 reason: "Plan Premium NegoSocio",
-                payer_email: email.toLowerCase().trim(),
+                payer_email: userEmailLimpio,
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15, // Ajustar al monto real en ARS
+                    transaction_amount: 15, // Importante: Ajustar este valor al precio real de tu servicio
                     currency_id: "ARS"
                 },
-                // IMPORTANTE: Agregamos el token 'at' a la URL de regreso
-                // Esto es lo que el Dashboard leerá para loguear al usuario automáticamente
+                // La back_url es clave: lleva el slug (u) y el magic token (at)
+                // El dashboard de Framer capturará estos parámetros para autenticar al usuario
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&at=${magicToken}`,
                 status: "pending"
             })
@@ -375,33 +389,42 @@ app.post("/api/create-subscription", async (req, res) => {
 
         const subscription = await response.json();
 
-        // Manejo de errores de la API de Mercado Pago
+        // Manejo de errores detallado de la API de Mercado Pago
         if (!response.ok) {
-            console.error("❌ Error de MP al generar suscripción:", subscription);
+            console.error("❌ Error de MP al generar suscripción:", JSON.stringify(subscription, null, 2));
             return res.status(response.status).json({ 
-                error: subscription.message || "No se pudo conectar con Mercado Pago. Reintentá." 
+                error: subscription.message || "No se pudo conectar con Mercado Pago. Reintentá.",
+                details: subscription.cause || []
             });
         }
 
-        // Obtenemos el link de pago (init_point es producción, sandbox es para pruebas)
+        // Obtenemos el link de pago
+        // init_point: Link oficial para producción
+        // sandbox_init_point: Link para entornos de prueba
         const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
+            console.error("❌ No se recibió init_point de MP:", subscription);
             throw new Error("No se encontró la URL de pago en la respuesta de Mercado Pago.");
         }
 
-        console.log(`🔗 Link de suscripción Premium generado para: ${email} (Token: ${magicToken})`);
+        console.log(`🔗 Link de suscripción Premium generado para: ${userEmailLimpio}`);
+        console.log(`🔑 Magic Token asociado: ${magicToken}`);
         
-        // Enviamos la URL y el mensaje de éxito al frontend
+        // Enviamos la URL y la confirmación al frontend
         res.json({ 
             success: true,
             init_point: checkoutUrl,
-            message: "Link de suscripción generado correctamente."
+            message: "Link de suscripción generado correctamente.",
+            token_generated: magicToken // Opcional: útil para debug en desarrollo
         }); 
 
     } catch (e) {
         console.error("❌ Error crítico creando suscripción:", e.message);
-        res.status(500).json({ error: "Error interno al procesar la suscripción." });
+        res.status(500).json({ 
+            error: "Error interno al procesar la suscripción.",
+            message: e.message 
+        });
     }
 });
     
