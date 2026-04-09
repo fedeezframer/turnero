@@ -246,7 +246,7 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Registro/Renovación con Backup en Sheets) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Desglosando desde Sheets) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             
@@ -259,35 +259,37 @@ app.post("/webhook", async (req, res) => {
                 // Solo procesamos si el pago está aprobado (authorized o active)
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
-                    console.log(`💳 Confirmado pago Premium para: ${userEmail}`);
+                    console.log(`💳 Pago Premium detectado para: ${userEmail}. Desglosando datos desde Sheets...`);
 
-                    // 1. RECUPERACIÓN DE DATOS (Primero RAM, si falla busca en Sheets)
-                    let datosSocio = registrosTemporales[userEmail];
+                    // 1. BUSCAR LA FILA EN "Premium Temp" (Fuente de verdad física)
+                    const sheets = await getSheets();
+                    const rangeRes = await sheets.spreadsheets.values.get({
+                        spreadsheetId: MASTER_SHEET_ID,
+                        range: "Premium Temp!A:B"
+                    });
+                    
+                    const rows = rangeRes.data.values || [];
+                    // Buscamos de abajo hacia arriba para obtener el registro más reciente
+                    const filaEncontrada = [...rows].reverse().find(row => 
+                        row[0] && row[0].trim().toLowerCase() === userEmail
+                    );
 
-                    if (!datosSocio) {
-                        console.log(`⚠️ RAM vacía para ${userEmail}. Buscando en hoja "Premium Temp"...`);
-                        const sheets = await getSheets();
-                        const rangeRes = await sheets.spreadsheets.values.get({
-                            spreadsheetId: MASTER_SHEET_ID,
-                            range: "Premium Temp!A:B"
-                        });
-                        
-                        const rows = rangeRes.data.values || [];
-                        // Buscamos de abajo hacia arriba para obtener el registro más reciente de ese email
-                        // Aplicamos trim() y toLowerCase() a la celda del Excel para evitar fallos por espacios
-                        const filaEncontrada = [...rows].reverse().find(row => 
-                            row[0] && row[0].trim().toLowerCase() === userEmail
-                        );
-                        
-                        if (filaEncontrada && filaEncontrada[1]) {
-                            try {
-                                datosSocio = JSON.parse(filaEncontrada[1]);
-                                console.log(`✅ Datos de "${datosSocio.business_name}" recuperados exitosamente desde Sheets.`);
-                            } catch (err) {
-                                console.error("❌ Error al parsear JSON desde Sheets:", err);
-                            }
+                    let datosSocio = null;
+
+                    if (filaEncontrada && filaEncontrada[1]) {
+                        try {
+                            datosSocio = JSON.parse(filaEncontrada[1]);
+                            console.log(`✅ Datos reales encontrados en Sheets para ${userEmail}.`);
+                        } catch (err) {
+                            console.error("❌ Error al parsear JSON de la Sheet:", err);
+                        }
+                    } else {
+                        // Si no está en Sheets, intentamos RAM como última instancia
+                        datosSocio = registrosTemporales[userEmail];
+                        if (datosSocio) {
+                            console.log(`ℹ️ Datos recuperados desde RAM para ${userEmail}.`);
                         } else {
-                            console.warn(`⚠️ No se encontró backup en Sheets para el email: ${userEmail}`);
+                            console.warn(`⚠️ ATENCIÓN: No hay datos en Sheets ni RAM para ${userEmail}. Se usarán defaults.`);
                         }
                     }
 
@@ -308,7 +310,7 @@ app.post("/webhook", async (req, res) => {
                         console.log("No se pudo extraer token de back_url.");
                     }
 
-                    // 3. GENERACIÓN DE SLUG DEFINITIVO (Sin acentos ni caracteres raros)
+                    // 3. GENERACIÓN DE SLUG DEFINITIVO (Misma lógica que verify-and-register)
                     const nombreBase = datosSocio?.business_name || userEmail.split('@')[0];
                     const realSlug = nombreBase
                         .toLowerCase()
@@ -320,7 +322,7 @@ app.post("/webhook", async (req, res) => {
 
                     console.log(`🚀 Sincronizando usuario Premium: ${realSlug}`);
 
-                    // 4. UPSERT EN SUPABASE (Priorizando siempre datosSocio sobre los defaults)
+                    // 4. UPSERT EN SUPABASE (Acomodando los datos desglosados)
                     const { error: upsertError } = await supabase.from('usuarios').upsert({
                         email: userEmail,
                         slug: realSlug,
@@ -342,8 +344,8 @@ app.post("/webhook", async (req, res) => {
                     if (upsertError) {
                         console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
                     } else {
-                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente con sus datos reales!`);
-                        // Limpieza de datos temporales para liberar RAM
+                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente con los datos de la planilla!`);
+                        // Limpieza selectiva de memoria y cache
                         delete registrosTemporales[userEmail];
                         delete globalCache[realSlug];
                     }
@@ -663,6 +665,7 @@ app.post("/api/request-verification", async (req, res) => {
         res.status(500).json({ error: "Error de conexión con el servicio de correos." }); 
     }
 });
+
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { 
