@@ -333,8 +333,8 @@ app.post("/webhook", async (req, res) => {
     }
 });
 
-app.post("/api/pre-register-premium", (req, res) => {
-    // Desestructuramos incluyendo 'password', que es clave para el login posterior
+app.post("/api/pre-register-premium", async (req, res) => {
+    // Desestructuramos todos los campos necesarios que vienen desde el DataGuardian de Framer
     const { 
         email, 
         business_name, 
@@ -347,44 +347,75 @@ app.post("/api/pre-register-premium", (req, res) => {
         password 
     } = req.body;
     
-    // Validación básica de seguridad
+    // Validación de seguridad básica
     if (!email) {
         return res.status(400).json({ error: "El email es requerido para el pre-registro." });
     }
 
     const emailKey = email.trim().toLowerCase();
 
-    // Verificamos si ya existe un registro temporal (por ejemplo, si ya se generó un token)
-    // para no pisar el access_token si ya fue creado por /api/create-subscription
-    const registroExistente = registrosTemporales[emailKey] || {};
+    try {
+        // 1. PERSISTENCIA EN MEMORIA (Para acceso rápido del Webhook)
+        // Verificamos si ya existe algo (como el access_token generado en create-subscription)
+        const registroExistente = registrosTemporales[emailKey] || {};
 
-    // Guardamos/Actualizamos el objeto en la memoria del servidor
-    registrosTemporales[emailKey] = {
-        ...registroExistente, // Mantenemos el access_token si ya existe
-        business_name: business_name || registroExistente.business_name,
-        nombre_persona: nombre_persona || registroExistente.nombre_persona,
-        precio: precio || registroExistente.precio,
-        duracion_turno: duracion_turno || registroExistente.duracion_turno,
-        horarios: horarios || registroExistente.horarios,
-        telefono: telefono || registroExistente.telefono,
-        plan: plan || 'premium',
-        password: password || registroExistente.password, // Guardamos la clave real del usuario
-        timestamp: Date.now() // Marca de tiempo para limpieza de memoria (opcional)
-    };
+        registrosTemporales[emailKey] = {
+            ...registroExistente,
+            business_name: business_name || registroExistente.business_name,
+            nombre_persona: nombre_persona || registroExistente.nombre_persona,
+            precio: precio || registroExistente.precio,
+            duracion_turno: duracion_turno || registroExistente.duracion_turno,
+            horarios: horarios || registroExistente.horarios,
+            telefono: telefono || registroExistente.telefono,
+            plan: plan || 'premium',
+            password: password || registroExistente.password,
+            timestamp: Date.now()
+        };
 
-    console.log(`📦 Datos temporales de registro guardados/actualizados para: ${emailKey}`);
-    
-    // Opcional: Log de depuración para verificar que el password llegó
-    if (password) {
-        console.log(`🔑 Password capturado correctamente para el flujo de pago.`);
-    } else {
-        console.warn(`⚠️ Advertencia: No se recibió password en el pre-registro de ${emailKey}`);
+        // 2. PERSISTENCIA EN GOOGLE SHEETS (Respaldo contra reinicios del servidor)
+        const sheets = await getSheets();
+        const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+
+        // Convertimos el objeto a string para guardarlo en una sola celda como JSON
+        const datosBackup = JSON.stringify({
+            business_name,
+            nombre_persona,
+            precio: parseInt(precio) || 0,
+            duracion_turno: parseInt(duracion_turno) || 30,
+            horarios,
+            telefono,
+            plan: plan || 'premium',
+            password: password || "auth-via-payment"
+        });
+
+        // Guardamos en la pestaña "Premium Temp"
+        // Columna A: Email | Columna B: Datos JSON | Columna C: Fecha
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "Premium Temp!A:C",
+            valueInputOption: "RAW",
+            requestBody: { 
+                values: [[emailKey, datosBackup, fechaHoy]] 
+            }
+        });
+
+        console.log(`✅ Registro Temporal completado para: ${emailKey}`);
+        console.log(`📦 Datos guardados en RAM y en hoja "Premium Temp"`);
+
+        res.json({ 
+            success: true, 
+            message: "Datos protegidos en backup. Procediendo al flujo de pago." 
+        });
+
+    } catch (e) {
+        console.error("❌ Error crítico en pre-register-premium:", e.message);
+        // Aunque falle Sheets, intentamos responder success si se guardó en RAM 
+        // para no trabar al usuario, pero avisamos en consola.
+        res.status(500).json({ 
+            error: "Error interno al procesar el backup de datos.",
+            details: e.message 
+        });
     }
-
-    res.json({ 
-        success: true, 
-        message: "Datos temporales almacenados correctamente. Listo para el pago." 
-    });
 });
 
 app.post("/api/create-subscription", async (req, res) => {
