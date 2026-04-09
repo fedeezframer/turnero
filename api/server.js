@@ -212,10 +212,7 @@ app.post("/webhook", async (req, res) => {
 
                 if (paymentData.status === "approved" && paymentData.metadata) {
                     const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
-                    
-                    // Limpieza de slug para asegurar coincidencia
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-                    
                     const partes = fecha.split("-");
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
@@ -225,28 +222,17 @@ app.post("/webhook", async (req, res) => {
                         spreadsheetId: MASTER_SHEET_ID,
                         range: "A:E",
                         valueInputOption: "RAW",
-                        requestBody: { 
-                            values: [[
-                                nombre.trim(), 
-                                telefono.toString().trim(), 
-                                textoTurnoNuevo, 
-                                fechaHoyReal, 
-                                slug
-                            ]] 
-                        }
+                        requestBody: { values: [[nombre.trim(), telefono.toString().trim(), textoTurnoNuevo, fechaHoyReal, slug]] }
                     });
 
-                    // Descontar token al dueño del negocio
                     if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
-                    
-                    // Limpiar caché para que el dashboard muestre el nuevo turno
                     delete globalCache[slug];
-                    console.log(`✅ Turno agendado y token descontado para el negocio: ${slug}`);
+                    console.log(`✅ Turno agendado para: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Desglosando desde Sheets) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Validación obligatoria via Sheets) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             
@@ -256,12 +242,11 @@ app.post("/webhook", async (req, res) => {
                 });
                 const subData = await response.json();
 
-                // Solo procesamos si el pago está aprobado (authorized o active)
                 if (subData.status === "authorized" || subData.status === "active") {
                     const userEmail = subData.payer_email.trim().toLowerCase();
-                    console.log(`💳 Pago Premium detectado para: ${userEmail}. Desglosando datos desde Sheets...`);
+                    console.log(`💳 Procesando Premium para: ${userEmail}`);
 
-                    // 1. BUSCAR LA FILA EN "Premium Temp" (Fuente de verdad física)
+                    // 1. BUSCAR EN SHEETS (Nuestra "Fuente de Verdad" persistente)
                     const sheets = await getSheets();
                     const rangeRes = await sheets.spreadsheets.values.get({
                         spreadsheetId: MASTER_SHEET_ID,
@@ -269,7 +254,6 @@ app.post("/webhook", async (req, res) => {
                     });
                     
                     const rows = rangeRes.data.values || [];
-                    // Buscamos de abajo hacia arriba para obtener el registro más reciente
                     const filaEncontrada = [...rows].reverse().find(row => 
                         row[0] && row[0].trim().toLowerCase() === userEmail
                     );
@@ -279,85 +263,70 @@ app.post("/webhook", async (req, res) => {
                     if (filaEncontrada && filaEncontrada[1]) {
                         try {
                             datosSocio = JSON.parse(filaEncontrada[1]);
-                            console.log(`✅ Datos reales encontrados en Sheets para ${userEmail}.`);
                         } catch (err) {
-                            console.error("❌ Error al parsear JSON de la Sheet:", err);
+                            console.error("❌ JSON corrupto en Sheets.");
                         }
                     } else {
-                        // Si no está en Sheets, intentamos RAM como última instancia
+                        // Fallback a RAM solo si la Sheet falló, pero sin defaults automáticos
                         datosSocio = registrosTemporales[userEmail];
-                        if (datosSocio) {
-                            console.log(`ℹ️ Datos recuperados desde RAM para ${userEmail}.`);
-                        } else {
-                            console.warn(`⚠️ ATENCIÓN: No hay datos en Sheets ni RAM para ${userEmail}. Se usarán defaults.`);
-                        }
                     }
 
-                    // 2. CONFIGURACIÓN DE TIEMPOS Y TOKEN DE SESIÓN
-                    const nuevaFechaVencimiento = new Date();
-                    nuevaFechaVencimiento.setMonth(nuevaFechaVencimiento.getMonth() + 1);
-                    nuevaFechaVencimiento.setDate(nuevaFechaVencimiento.getDate() + 2); // 2 días de gracia
+                    // BLOQUEO DE SEGURIDAD: Si no hay datos reales, no creamos nada basura
+                    if (!datosSocio) {
+                        console.error(`🚫 ABORTADO: No existen datos previos para ${userEmail}.`);
+                        return res.sendStatus(200);
+                    }
 
-                    let magicToken = datosSocio?.access_token || "session_" + crypto.randomBytes(8).toString('hex');
+                    // 2. CONFIGURACIÓN DE VENCIMIENTO Y TOKEN
+                    const vencimiento = new Date();
+                    vencimiento.setMonth(vencimiento.getMonth() + 1);
+                    vencimiento.setDate(vencimiento.getDate() + 2);
+
+                    let magicToken = datosSocio.access_token || crypto.randomBytes(16).toString('hex');
                     try {
                         if (subData.back_url) {
                             const urlObj = new URL(subData.back_url);
-                            if (urlObj.searchParams.get("at")) {
-                                magicToken = urlObj.searchParams.get("at");
-                            }
+                            if (urlObj.searchParams.get("at")) magicToken = urlObj.searchParams.get("at");
                         }
-                    } catch (e) {
-                        console.log("No se pudo extraer token de back_url.");
-                    }
+                    } catch (e) {}
 
-                    // 3. GENERACIÓN DE SLUG DEFINITIVO (Misma lógica que verify-and-register)
-                    const nombreBase = datosSocio?.business_name || userEmail.split('@')[0];
-                    const realSlug = nombreBase
-                        .toLowerCase()
-                        .trim()
-                        .normalize("NFD")
-                        .replace(/[\u0300-\u036f]/g, "") // Quita acentos
-                        .replace(/\s+/g, '-')
-                        .replace(/[^a-z0-9-]/g, '');
+                    // 3. SLUG DEFINITIVO
+                    const realSlug = (datosSocio.business_name || "negocio")
+                        .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                        .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
-                    console.log(`🚀 Sincronizando usuario Premium: ${realSlug}`);
-
-                    // 4. UPSERT EN SUPABASE (Acomodando los datos desglosados)
+                    // 4. UPSERT EN SUPABASE (Desglose total)
                     const { error: upsertError } = await supabase.from('usuarios').upsert({
                         email: userEmail,
                         slug: realSlug,
-                        business_name: datosSocio?.business_name || "Mi Negocio Premium",
-                        nombre_persona: datosSocio?.nombre_persona || "Dueño Premium",
-                        precio: datosSocio?.precio ? parseInt(datosSocio.precio) : 0,
-                        duracion_turno: datosSocio?.duracion_turno ? parseInt(datosSocio.duracion_turno) : 30,
-                        horarios: datosSocio?.horarios || {},
-                        telefono: datosSocio?.telefono || null,
+                        business_name: datosSocio.business_name,
+                        nombre_persona: datosSocio.nombre_persona,
+                        password: String(datosSocio.password || "auth-pago"),
+                        precio: parseInt(datosSocio.precio) || 0,
+                        duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
+                        horarios: datosSocio.horarios || {},
+                        telefono: datosSocio.telefono || null,
                         plan: 'premium',
                         tokens: 100000,
                         access_token: magicToken,
-                        subscription_expiry: nuevaFechaVencimiento.toISOString(),
-                        password: datosSocio?.password || "auth-via-payment",
+                        subscription_expiry: vencimiento.toISOString(),
                         sheet_id: MASTER_SHEET_ID,
                         metodo_pago: 'mercadopago'
                     }, { onConflict: 'email' });
 
                     if (upsertError) {
-                        console.error("❌ Error de Supabase al guardar Premium:", upsertError.message);
+                        console.error("❌ Error Supabase:", upsertError.message);
                     } else {
-                        console.log(`✨ ¡Usuario ${realSlug} activado correctamente con los datos de la planilla!`);
-                        // Limpieza selectiva de memoria y cache
+                        console.log(`✨ ¡Usuario ${realSlug} sincronizado con éxito!`);
                         delete registrosTemporales[userEmail];
                         delete globalCache[realSlug];
                     }
                 }
             }
         }
-
-        // Siempre responder 200 a Mercado Pago para evitar reintentos infinitos
         res.sendStatus(200);
-
     } catch (e) {
-        console.error("❌ Error crítico dentro del Webhook:", e.message);
+        console.error("❌ Error crítico Webhook:", e.message);
         res.sendStatus(200);
     }
 });
