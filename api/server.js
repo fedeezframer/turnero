@@ -26,14 +26,15 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const globalCache = {};
 const CACHE_DURATION = 20000;
 
-// --- UTILIDADES ---
 const getCleanSlug = (rawSlug) => {
     if (!rawSlug) return "";
     return rawSlug
-        .replace("reserva-user-", "")
-        .replace("check-availability-", "")
-        .replace("/", "")
-        .trim();
+        .toLowerCase()
+        .trim()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
 };
 
 async function getGoogleAuth() {
@@ -201,7 +202,7 @@ app.post("/webhook", async (req, res) => {
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
 
-        // --- A. LÓGICA PARA PAGOS DE TURNOS INDIVIDUALES ---
+        // --- A. LÓGICA PARA PAGOS DE TURNOS INDIVIDUALES (SEÑAS/TOTALES) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -210,21 +211,21 @@ app.post("/webhook", async (req, res) => {
                 });
                 const paymentData = await paymentResponse.json();
 
-                // Verificamos que el pago esté aprobado y tenga la metadata que enviamos desde el frontend
+                // Verificamos que el pago esté aprobado y tenga la metadata
                 if (paymentData.status === "approved" && paymentData.metadata) {
                     const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
-                    // Limpieza de slug para asegurar que coincida con la base de datos
+                    // Limpieza de slug
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
                     
-                    // Formateo de fecha para la Google Sheet
-                    const partes = fecha.split("-"); // Asume formato YYYY-MM-DD
+                    // Formateo de fecha para Google Sheets
+                    const partes = fecha.split("-"); // YYYY-MM-DD
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
                     const sheets = await getSheets();
                     
-                    // Guardamos el turno en la planilla principal del profesional
+                    // Guardamos el turno en la planilla
                     await sheets.spreadsheets.values.append({
                         spreadsheetId: MASTER_SHEET_ID,
                         range: "A:E",
@@ -234,25 +235,25 @@ app.post("/webhook", async (req, res) => {
                         }
                     });
 
-                    // Descontamos el token por el uso del servicio
+                    // Descontamos el token
                     if (typeof handleTokenDiscount === 'function') {
                         await handleTokenDiscount(slug);
                     }
                     
-                    // Limpiamos caché para que el dashboard muestre los datos nuevos
+                    // Limpieza de caché
                     delete globalCache[slug];
                     console.log(`✅ Turno agendado exitosamente para el negocio: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (Activación de Cuenta) ---
-        // Escuchamos tanto la creación de la suscripción como los pagos automáticos mensuales
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (ACTIVACIÓN DE CUENTA) ---
+        // Escuchamos la creación y los pagos mensuales automáticos
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized_payment") {
             const subId = body.data?.id || body.id;
             
             if (subId) {
-                // Consultamos directamente a la API de Mercado Pago para validar el estado real
+                // Consultamos el estado real en la API de Mercado Pago
                 const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
@@ -260,107 +261,68 @@ app.post("/webhook", async (req, res) => {
 
                 console.log("🔍 Detalles de suscripción recuperados:", JSON.stringify(subData));
 
-                // Solo actuamos si la suscripción está autorizada o activa
+                // Si el pago está autorizado o activo, procedemos a activar en Supabase
                 if (subData.status === "authorized" || subData.status === "active") {
                     
-                    // Intentamos capturar el email del pagador desde cualquier campo posible del JSON de MP
                     const rawEmail = subData.payer_email || (subData.payer && subData.payer.email) || "";
                     const userEmail = rawEmail.trim().toLowerCase();
                     
                     if (!userEmail) {
-                        console.error("❌ Error: Mercado Pago no devolvió el email del pagador.");
-                        return res.sendStatus(200); // Respondemos 200 para que MP no reintente infinitamente
+                        console.error("❌ Error: No se pudo obtener el email del pagador desde la suscripción.");
+                        return res.sendStatus(200);
                     }
 
-                    console.log(`📩 Iniciando proceso de activación para: ${userEmail}`);
-                    
-                    // Intentamos recuperar los datos del negocio (nombre, horarios, pass) de la RAM
-                    let datosSocio = registrosTemporales[userEmail];
+                    console.log(`🚀 Activando Plan Premium para: ${userEmail}`);
 
-                    // Si el servidor se reinició, la RAM está vacía. Vamos al rescate en Google Sheets.
-                    if (!datosSocio) {
-                        console.log(`☁️ Buscando respaldo en la hoja "Premium Temp" para ${userEmail}...`);
-                        try {
-                            const sheets = await getSheets();
-                            const sheetRes = await sheets.spreadsheets.values.get({
-                                spreadsheetId: MASTER_SHEET_ID,
-                                range: "Premium Temp!A:B"
-                            });
-                            
-                            const rows = sheetRes.data.values || [];
-                            // Buscamos la fila más reciente que coincida con el email
-                            const rowEncontrada = [...rows].reverse().find(r => r[0]?.toLowerCase() === userEmail);
-                            
-                            if (rowEncontrada) {
-                                datosSocio = JSON.parse(rowEncontrada[1]);
-                                console.log("✅ Datos de negocio recuperados desde Google Sheets.");
-                            }
-                        } catch (sheetError) {
-                            console.error("❌ Error de conexión con Google Sheets:", sheetError.message);
-                        }
-                    }
+                    // Calculamos el vencimiento (1 mes + 2 días de gracia)
+                    const vencimiento = new Date();
+                    vencimiento.setMonth(vencimiento.getMonth() + 1);
+                    vencimiento.setDate(vencimiento.getDate() + 2);
 
-                    // Si finalmente tenemos los datos del negocio, creamos/actualizamos en Supabase
-                    if (datosSocio) {
-                        // Generación de URL amigable (slug) basada en el nombre del negocio
-                        const realSlug = (datosSocio.business_name || "mi-negocio")
-                            .toLowerCase()
-                            .trim()
-                            .normalize("NFD")
-                            .replace(/[\u0300-\u036f]/g, "") // Quita acentos
-                            .replace(/\s+/g, '-')             // Espacios por guiones
-                            .replace(/[^a-z0-9-]/g, '');      // Quita caracteres especiales
-
-                        // Calculamos vencimiento (1 mes + 2 días de gracia)
-                        const vencimiento = new Date();
-                        vencimiento.setMonth(vencimiento.getMonth() + 1);
-                        vencimiento.setDate(vencimiento.getDate() + 2);
-
-                        console.log(`🚀 Sincronizando Supabase para el slug: ${realSlug}`);
-
-                        const { error: upsertError } = await supabase.from('usuarios').upsert({
-                            email: userEmail,
-                            slug: realSlug,
-                            business_name: datosSocio.business_name,
-                            nombre_persona: datosSocio.nombre_persona,
-                            password: String(datosSocio.password || "auth-pago"),
-                            precio: parseInt(datosSocio.precio) || 0,
-                            duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
-                            horarios: datosSocio.horarios || {},
-                            telefono: datosSocio.telefono || null,
+                    // ACTUALIZACIÓN DIRECTA EN SUPABASE
+                    // Ya no creamos el usuario, solo actualizamos su plan de 'pendiente' a 'premium'
+                    const { data, error: updateError } = await supabase
+                        .from('usuarios')
+                        .update({
                             plan: 'premium',
                             tokens: 100000, // Tokens ilimitados para premium
-                            access_token: datosSocio.access_token || null, 
                             subscription_expiry: vencimiento.toISOString(),
-                            sheet_id: MASTER_SHEET_ID,
                             metodo_pago: 'mercadopago'
-                        }, { onConflict: 'email' });
+                        })
+                        .eq('email', userEmail)
+                        .select();
 
-                        if (upsertError) {
-                            console.error("❌ Error al insertar en Supabase:", upsertError.message);
-                        } else {
-                            console.log(`✨ ¡CUENTA PREMIUM ACTIVADA! El negocio ya puede recibir turnos.`);
-                            // Limpieza final de memoria
-                            delete registrosTemporales[userEmail];
-                        }
+                    if (updateError) {
+                        console.error("❌ Error al activar premium en Supabase:", updateError.message);
+                    } else if (data && data.length > 0) {
+                        console.log(`✨ ¡CUENTA ACTIVADA! El negocio ${data[0].business_name} ya es Premium.`);
+                        
+                        // Limpiamos caché por si acaso estaba guardado como pendiente
+                        delete globalCache[data[0].slug];
                     } else {
-                        console.warn(`⚠️ Pago recibido de ${userEmail}, pero no existen datos previos de registro para crear el negocio.`);
+                        console.warn(`⚠️ Se recibió pago de ${userEmail} pero el usuario no existe en la DB.`);
+                    }
+
+                    // Limpieza de seguridad en registrosTemporales (si existiera algo)
+                    if (registrosTemporales[userEmail]) {
+                        delete registrosTemporales[userEmail];
                     }
                 }
             }
         }
 
-        // Siempre respondemos 200 a Mercado Pago para confirmar recepción
+        // Siempre respondemos 200 a Mercado Pago
         res.sendStatus(200);
 
     } catch (e) {
         console.error("🔥 Error crítico en el Webhook:", e.message);
+        // Respondemos 500 solo en errores catastróficos, pero MP reintentará
         res.status(500).send("Internal Server Error");
     }
 });
 
 app.post("/api/pre-register-premium", async (req, res) => {
-    // Desestructuramos todos los campos necesarios que vienen desde el DataGuardian de Framer
+    // 1. Recibimos todos los datos desde el DataGuardian de Framer
     const { 
         email, 
         business_name, 
@@ -374,87 +336,79 @@ app.post("/api/pre-register-premium", async (req, res) => {
     } = req.body;
     
     // Validación de seguridad básica
-    if (!email) {
-        return res.status(400).json({ error: "El email es requerido para el pre-registro." });
+    if (!email || !business_name || !password) {
+        return res.status(400).json({ error: "Faltan datos obligatorios para iniciar el registro." });
     }
 
     const emailKey = email.trim().toLowerCase();
 
     try {
-        // 1. PERSISTENCIA EN MEMORIA (Para acceso rápido del Webhook)
-        // Verificamos si ya existe algo (como el access_token generado previamente en create-subscription)
-        const registroExistente = registrosTemporales[emailKey] || {};
+        console.log(`🆕 Iniciando pre-registro Premium para: ${emailKey}`);
 
-        const nuevosDatos = {
-            ...registroExistente,
-            business_name: business_name || registroExistente.business_name,
-            nombre_persona: nombre_persona || registroExistente.nombre_persona,
-            precio: precio || registroExistente.precio,
-            duracion_turno: duracion_turno || registroExistente.duracion_turno,
-            horarios: horarios || registroExistente.horarios,
-            telefono: telefono || registroExistente.telefono,
-            plan: plan || 'premium',
-            password: password || registroExistente.password,
-            // Importante: preservamos el access_token si ya existe en RAM
-            access_token: registroExistente.access_token || null,
-            timestamp: Date.now()
-        };
+        // 2. Generación del Slug (URL amigable)
+        const realSlug = (business_name || "mi-negocio")
+            .toLowerCase()
+            .trim()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "") // Quita acentos
+            .replace(/\s+/g, '-')             // Espacios por guiones
+            .replace(/[^a-z0-9-]/g, '');      // Quita caracteres especiales
 
-        registrosTemporales[emailKey] = nuevosDatos;
+        // 3. PERSISTENCIA DIRECTA EN SUPABASE
+        // Insertamos al usuario con plan 'pendiente'. 
+        // Si el usuario ya existe (por un intento previo), actualizamos sus datos (upsert).
+        const { error: upsertError } = await supabase
+            .from('usuarios')
+            .upsert({
+                email: emailKey,
+                slug: realSlug,
+                business_name: business_name.trim(),
+                nombre_persona: nombre_persona ? nombre_persona.trim() : null,
+                password: String(password), // Guardamos la pass elegida
+                precio: parseInt(precio) || 0,
+                duracion_turno: parseInt(duracion_turno) || 30,
+                horarios: horarios || {},
+                telefono: telefono || null,
+                plan: 'pendiente', // <--- IMPORTANTE: No puede entrar hasta que pague
+                tokens: 0,         // Sin tokens hasta que se active
+                sheet_id: MASTER_SHEET_ID,
+                created_at: new Date().toISOString()
+            }, { onConflict: 'email' });
 
-        // 2. PERSISTENCIA EN GOOGLE SHEETS (Respaldo contra reinicios del servidor)
-        const sheets = await getSheets();
-        const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+        if (upsertError) {
+            console.error("❌ Error al guardar en Supabase durante pre-registro:", upsertError.message);
+            throw new Error("No se pudo guardar la información del negocio en la base de datos.");
+        }
 
-        // Convertimos el objeto completo a string para guardarlo en una sola celda como JSON.
-        // Incluimos el access_token en el JSON para que el backup sea 100% funcional.
-        const datosBackup = JSON.stringify({
-            business_name: nuevosDatos.business_name,
-            nombre_persona: nuevosDatos.nombre_persona,
-            precio: parseInt(nuevosDatos.precio) || 0,
-            duracion_turno: parseInt(nuevosDatos.duracion_turno) || 30,
-            horarios: nuevosDatos.horarios,
-            telefono: nuevosDatos.telefono,
-            plan: nuevosDatos.plan,
-            password: nuevosDatos.password,
-            access_token: nuevosDatos.access_token // <--- Backup del token técnico
-        });
+        // 4. OPCIONAL: Respaldo en Google Sheets (Solo por auditoría, ya no es crítico)
+        try {
+            const sheets = await getSheets();
+            const fechaHoy = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+            
+            await sheets.spreadsheets.values.append({
+                spreadsheetId: MASTER_SHEET_ID,
+                range: "Premium Temp!A:C",
+                valueInputOption: "RAW",
+                requestBody: { 
+                    values: [[emailKey, `Registro pendiente: ${business_name}`, fechaHoy]] 
+                }
+            });
+        } catch (sheetError) {
+            console.warn("⚠️ No se pudo guardar el log en Sheets, pero el usuario ya está en Supabase.");
+        }
 
-        // Guardamos en la pestaña "Premium Temp"
-        // Columna A: Email | Columna B: Datos JSON | Columna C: Fecha
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "Premium Temp!A:C",
-            valueInputOption: "RAW",
-            requestBody: { 
-                values: [[emailKey, datosBackup, fechaHoy]] 
-            }
-        });
-
-        console.log(`✅ Registro Temporal completado para: ${emailKey}`);
-        console.log(`📦 Datos guardados en RAM y en hoja "Premium Temp" (con backup de token)`);
+        console.log(`✅ Pre-registro completado en DB para: ${emailKey} con slug: ${realSlug}`);
 
         res.json({ 
             success: true, 
-            message: "Datos protegidos en backup. Procediendo al flujo de pago." 
+            message: "Datos guardados. Redirigiendo a Mercado Pago.",
+            slug: realSlug
         });
 
     } catch (e) {
-        console.error("❌ Error crítico en pre-register-premium:", e.message);
-        
-        // Si falló Sheets pero se guardó en RAM, dejamos que el usuario siga para no trabar la venta,
-        // pero tiramos un warning en consola.
-        if (registrosTemporales[emailKey]) {
-            console.warn("⚠️ Falló el backup en Sheets, pero los datos están en RAM. Continuando...");
-            return res.json({ 
-                success: true, 
-                warning: "Backup en la nube fallido, pero sesión activa.",
-                message: "Procediendo al flujo de pago." 
-            });
-        }
-
+        console.error("🔥 Error crítico en pre-register-premium:", e.message);
         res.status(500).json({ 
-            error: "Error interno al procesar el backup de datos.",
+            error: "Error interno al procesar el pre-registro.",
             details: e.message 
         });
     }
@@ -473,26 +427,40 @@ app.post("/api/create-subscription", async (req, res) => {
 
         const userEmailLimpio = email.toLowerCase().trim();
 
-        // 1. Generamos el slug a partir del email para la vuelta al dashboard
-        // Esto sirve como identificador visual en la URL de regreso
-        const userSlug = userEmailLimpio.split('@')[0].replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        // 1. Buscamos al usuario en Supabase para obtener su slug real
+        // Esto es mejor que generarlo de nuevo para asegurar consistencia
+        const { data: user, error: userError } = await supabase
+            .from('usuarios')
+            .select('slug')
+            .eq('email', userEmailLimpio)
+            .single();
 
-        // 2. Generamos un Magic Token aleatorio y seguro
-        // Este token se envía en la back_url y se guarda en registrosTemporales para que el Webhook lo use
-        const magicToken = crypto.randomBytes(16).toString('hex');
-
-        // --- NUEVO: GUARDADO PREVENTIVO EN MEMORIA ---
-        // Si el usuario ya hizo el pre-register, vinculamos el token a sus datos existentes
-        if (registrosTemporales[userEmailLimpio]) {
-            registrosTemporales[userEmailLimpio].access_token = magicToken;
-            console.log(`🔑 Magic Token vinculado a datos temporales de: ${userEmailLimpio}`);
-        } else {
-            // Si por alguna razón no hay pre-register, creamos el espacio para no perder el token
-            registrosTemporales[userEmailLimpio] = { access_token: magicToken };
-            console.log(`⚠️ Advertencia: Creando registro temporal solo para token (faltó pre-register) para: ${userEmailLimpio}`);
+        if (userError || !user) {
+            console.error("❌ Error: Se intentó crear suscripción para un email no registrado.");
+            return res.status(404).json({ error: "Usuario no encontrado. Primero debe completar el registro." });
         }
 
-        // 3. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
+        const userSlug = user.slug;
+
+        // 2. Generamos un Magic Token aleatorio y seguro
+        const magicToken = crypto.randomBytes(16).toString('hex');
+
+        // 3. PERSISTENCIA EN SUPABASE
+        // Guardamos el token en la columna 'access_token' del usuario.
+        // Esto permite que al volver del pago, el dashboard lo reconozca.
+        const { error: updateError } = await supabase
+            .from('usuarios')
+            .update({ access_token: magicToken })
+            .eq('email', userEmailLimpio);
+
+        if (updateError) {
+            console.error("❌ Error al guardar magic token en Supabase:", updateError.message);
+            throw new Error("No se pudo vincular el token de acceso a la cuenta.");
+        }
+
+        console.log(`🔑 Magic Token vinculado en DB para: ${userEmailLimpio}`);
+
+        // 4. Llamada a la API de Mercado Pago para crear la suscripción (Preapproval)
         const response = await fetch("https://api.mercadopago.com/preapproval", {
             method: "POST",
             headers: {
@@ -505,11 +473,11 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15, // Ajustar al valor real
+                    transaction_amount: 15, // Cambiar por el valor real en ARS (ej: 15000)
                     currency_id: "ARS"
                 },
-                // La back_url lleva el slug (u) y el magic token (at)
-                // Es vital que el "at" coincida con el que guardamos en registrosTemporales
+                // La back_url lleva el slug real del negocio y el magic token
+                // El dashboard verificará que este 'at' coincida con el de la DB
                 back_url: `https://negosocio.framer.website/dashboard?u=${userSlug}&at=${magicToken}`,
                 status: "pending"
             })
@@ -517,16 +485,16 @@ app.post("/api/create-subscription", async (req, res) => {
 
         const subscription = await response.json();
 
-        // Manejo de errores detallado de la API de Mercado Pago
+        // Manejo de errores de la API de Mercado Pago
         if (!response.ok) {
             console.error("❌ Error de MP al generar suscripción:", JSON.stringify(subscription, null, 2));
             return res.status(response.status).json({ 
-                error: subscription.message || "No se pudo conectar con Mercado Pago. Reintentá.",
+                error: subscription.message || "No se pudo conectar con Mercado Pago.",
                 details: subscription.cause || []
             });
         }
 
-        // Obtenemos el link de pago
+        // Obtenemos el link de pago oficial
         const checkoutUrl = subscription.init_point || subscription.sandbox_init_point;
 
         if (!checkoutUrl) {
@@ -535,14 +503,13 @@ app.post("/api/create-subscription", async (req, res) => {
         }
 
         console.log(`🔗 Link de suscripción Premium generado para: ${userEmailLimpio}`);
-        console.log(`🔑 Magic Token asociado: ${magicToken}`);
         
-        // Enviamos la URL y la confirmación al frontend
+        // Enviamos la URL al frontend (Framer)
         res.json({ 
             success: true,
             init_point: checkoutUrl,
             message: "Link de suscripción generado correctamente.",
-            token_generated: magicToken 
+            slug: userSlug
         }); 
 
     } catch (e) {
@@ -1076,27 +1043,28 @@ app.post("/cancel-appointment", async (req, res) => {
 app.get("/verify-session", async (req, res) => {
     try {
         const rawU = req.query.u;
-        // Capturamos el Magic Token que viene en la URL como 'at'
+        // Capturamos el Magic Token que viene en la URL como 'at' (access token)
         const magicToken = req.query.at; 
 
         if (!rawU) {
-            console.log("⚠️ Intento de verificación sin parámetro 'u'");
+            console.log("⚠️ Intento de verificación sin parámetro 'u' (slug)");
             return res.json({ active: false, reason: "no_slug" });
         }
 
-        // Limpiamos el slug con la misma función que usas en el registro/login
-        const slug = getCleanSlug(rawU);
+        // Limpiamos el slug recibido para evitar errores de formato
+        const slug = rawU.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
         
         console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
 
-        // IMPORTANTE: Seleccionamos tokens y access_token además de los datos básicos
+        // Consultamos la base de datos buscando al usuario por su slug
+        // Traemos plan, vencimiento, tokens y el magic token guardado
         const { data: user, error } = await supabase
             .from('usuarios')
             .select('slug, plan, subscription_expiry, access_token, tokens')
             .eq('slug', slug)
             .single();
 
-        // Si hay error en Supabase o el usuario no existe
+        // Si el usuario no existe en la base de datos
         if (error || !user) {
             console.log(`❌ Usuario no encontrado en DB: ${slug}`);
             return res.json({ 
@@ -1106,27 +1074,41 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- 1. LÓGICA DE MAGIC LOGIN (Pase VIP) ---
-        // Si el usuario trae un token y ese token coincide con el que guardó el Webhook...
+        // --- 1. LÓGICA DE MAGIC LOGIN (Entrada Directa Post-Pago) ---
+        // Si el usuario viene redirigido de MP con el token correcto...
         if (magicToken && user.access_token === magicToken) {
-            console.log(`✨ Magic Login exitoso para: ${slug}. Limpiando token usado...`);
+            console.log(`✨ Magic Login detectado para: ${slug}. Validando acceso...`);
             
-            // Borramos el token de la DB para que el link no sirva una segunda vez (Seguridad)
+            // Seguridad: Borramos el token de la DB para que el link no pueda ser usado otra vez
             await supabase
                 .from('usuarios')
                 .update({ access_token: null })
                 .eq('slug', slug);
             
-            // Retornamos éxito inmediato saltándonos otras validaciones
+            // Si el plan es 'pendiente', lo tratamos como activo temporalmente 
+            // porque el Webhook podría tardar unos segundos más que la redirección.
+            const planFinal = user.plan === 'pendiente' ? 'premium' : user.plan;
+
             return res.json({ 
                 active: true, 
                 slug: user.slug, 
-                plan: user.plan,
+                plan: planFinal,
                 magicLogin: true 
             });
         }
 
-        // --- 2. LÓGICA DE BLOQUEO (402 PAYMENT REQUIRED) ---
+        // --- 2. LÓGICA DE BLOQUEO POR ESTADO 'PENDIENTE' ---
+        // Si no hay magic token y el plan sigue en pendiente, no puede pasar
+        if (user.plan === 'pendiente') {
+            console.log(`⏳ El usuario ${slug} intentó entrar pero su pago aún procesa.`);
+            return res.status(402).json({
+                active: false,
+                reason: "payment_pending",
+                msg: "Tu pago se está procesando. Reintenta en unos instantes."
+            });
+        }
+
+        // --- 3. LÓGICA DE BLOQUEO POR VENCIMIENTO O TOKENS (402) ---
 
         // CASO A: Usuario Premium con suscripción vencida
         if (user.plan === 'premium') {
@@ -1135,8 +1117,7 @@ app.get("/verify-session", async (req, res) => {
                 const vencimiento = new Date(user.subscription_expiry);
 
                 if (ahora > vencimiento) {
-                    console.log(`🚫 Suscripción vencida para ${slug}. Venció el: ${vencimiento}`);
-                    // Devolvemos 402 para que el ProtectedRoute de Framer sepa que debe ir a /renovar
+                    console.log(`🚫 Suscripción vencida para ${slug}.`);
                     return res.status(402).json({ 
                         active: false, 
                         reason: "expired",
@@ -1144,16 +1125,14 @@ app.get("/verify-session", async (req, res) => {
                     });
                 }
             } else {
-                console.log(`⚠️ Usuario ${slug} es premium pero no tiene fecha de vencimiento. Se permite acceso.`);
+                console.log(`⚠️ Usuario ${slug} es premium sin fecha de vencimiento explícita. Acceso permitido.`);
             }
         }
 
         // CASO B: Usuario Gratis sin tokens disponibles
         if (user.plan === 'gratis') {
-            // Si tokens es null o menor/igual a cero, bloqueamos el acceso
             if (user.tokens === null || user.tokens <= 0) {
-                console.log(`🚫 Acceso denegado por falta de tokens para: ${slug}`);
-                // Enviamos 402 para disparar la redirección en el dashboard
+                console.log(`🚫 Sin tokens para: ${slug}`);
                 return res.status(402).json({
                     active: false,
                     reason: "no_tokens",
@@ -1162,8 +1141,8 @@ app.get("/verify-session", async (req, res) => {
             }
         }
 
-        // --- 3. TODO OK (Login manual o sesión persistente) ---
-        console.log(`✅ Sesión confirmada para: ${slug} (${user.plan.toUpperCase()})`);
+        // --- 4. ACCESO CONCEDIDO (Sesión Normal) ---
+        console.log(`✅ Sesión confirmada: ${slug} (Plan: ${user.plan})`);
         res.json({ 
             active: true, 
             slug: user.slug, 
@@ -1173,7 +1152,6 @@ app.get("/verify-session", async (req, res) => {
 
     } catch (e) { 
         console.error("🔥 Error crítico en verify-session:", e.message);
-        // Enviamos el error para que el frontend no rebote a ciegas
         res.status(500).json({ 
             active: false, 
             error: "internal_server_error",
