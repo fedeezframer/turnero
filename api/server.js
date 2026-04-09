@@ -201,7 +201,7 @@ app.post("/webhook", async (req, res) => {
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
 
-        // --- A. LÓGICA PARA PAGOS DE TURNOS (Sin cambios) ---
+        // --- A. LÓGICA PARA PAGOS DE TURNOS ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
             if (paymentId) {
@@ -227,11 +227,12 @@ app.post("/webhook", async (req, res) => {
 
                     if (typeof handleTokenDiscount === 'function') await handleTokenDiscount(slug);
                     delete globalCache[slug];
+                    console.log(`✅ Turno agendado para: ${slug}`);
                 }
             }
         }
 
-        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (El arreglo para Mayra) ---
+        // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized") {
             const subId = body.data?.id || body.id;
             
@@ -242,90 +243,77 @@ app.post("/webhook", async (req, res) => {
                 const subData = await response.json();
 
                 if (subData.status === "authorized" || subData.status === "active") {
+                    const userEmail = (subData.payer_email || subData.payer?.email || "").trim().toLowerCase();
                     
-                    // 🔍 BÚSQUEDA EN CASCADA DEL EMAIL (Mercado Pago lo cambia según la versión)
-                    const userEmail = (
-                        subData.payer_email || 
-                        subData.payer?.email || 
-                        (subData.metadata && subData.metadata.email) ||
-                        ""
-                    ).trim().toLowerCase();
+                    if (!userEmail) return res.sendStatus(200);
 
-                    console.log(`💳 Procesando suscripción. Mail detectado: "${userEmail}"`);
+                    let datosSocio = registrosTemporales[userEmail];
 
-                    if (!userEmail) {
-                        console.error("❌ CRÍTICO: Mercado Pago no envió el email en ningún campo conocido.");
-                        console.log("Estructura recibida:", JSON.stringify(subData)); // Para debuggear en Render
-                        return res.sendStatus(200);
+                    // Respaldo en Google Sheets si la RAM falló
+                    if (!datosSocio) {
+                        console.log(`☁️ Buscando respaldo en Sheets para ${userEmail}...`);
+                        const sheets = await getSheets();
+                        const sheetRes = await sheets.spreadsheets.values.get({
+                            spreadsheetId: MASTER_SHEET_ID,
+                            range: "Premium Temp!A:B"
+                        });
+                        const rows = sheetRes.data.values || [];
+                        const rowEncontrada = [...rows].reverse().find(r => r[0]?.toLowerCase() === userEmail);
+                        
+                        if (rowEncontrada) datosSocio = JSON.parse(rowEncontrada[1]);
                     }
 
-                    // 1. BUSCAR EN SHEETS (Única fuente de verdad)
-                    const sheets = await getSheets();
-                    const rangeRes = await sheets.spreadsheets.values.get({
-                        spreadsheetId: MASTER_SHEET_ID,
-                        range: "Premium Temp!A:B"
-                    });
-                    
-                    const rows = rangeRes.data.values || [];
-                    const registroEnSheet = [...rows].reverse().find(row => 
-                        row[0] && row[0].trim().toLowerCase() === userEmail
-                    );
+                    if (datosSocio) {
+                        console.log(`✨ Procesando activación Premium para ${userEmail}`);
 
-                    if (!registroEnSheet) {
-                        console.error(`🚫 Validación fallida: El mail ${userEmail} no existe en la hoja Premium Temp.`);
-                        return res.sendStatus(200);
-                    }
+                        // Preparar vencimiento (1 mes + 2 días de gracia)
+                        const vencimiento = new Date();
+                        vencimiento.setMonth(vencimiento.getMonth() + 1);
+                        vencimiento.setDate(vencimiento.getDate() + 2);
 
-                    let datosSocio;
-                    try {
-                        datosSocio = JSON.parse(registroEnSheet[1]);
-                    } catch (e) {
-                        console.error("❌ Error: El JSON de la planilla está mal formado.");
-                        return res.sendStatus(200);
-                    }
+                        const realSlug = (datosSocio.business_name || "negocio")
+                            .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                            .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
-                    // 2. CONFIGURACIÓN FINAL
-                    const vencimiento = new Date();
-                    vencimiento.setMonth(vencimiento.getMonth() + 1);
-                    vencimiento.setDate(vencimiento.getDate() + 2);
+                        // INSERTAR/ACTUALIZAR EN SUPABASE
+                        const { error: upsertError } = await supabase.from('usuarios').upsert({
+                            email: userEmail,
+                            slug: realSlug,
+                            business_name: datosSocio.business_name,
+                            nombre_persona: datosSocio.nombre_persona,
+                            password: String(datosSocio.password || "auth-pago"),
+                            precio: parseInt(datosSocio.precio) || 0,
+                            duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
+                            horarios: datosSocio.horarios || {},
+                            telefono: datosSocio.telefono || null,
+                            plan: 'premium',
+                            tokens: 100000,
+                            access_token: datosSocio.access_token || crypto.randomBytes(16).toString('hex'),
+                            subscription_expiry: vencimiento.toISOString(),
+                            sheet_id: MASTER_SHEET_ID,
+                            metodo_pago: 'mercadopago'
+                        }, { onConflict: 'email' });
 
-                    const realSlug = (datosSocio.business_name || "negocio")
-                        .toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-                        .replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-                    // 3. UPSERT EN SUPABASE (Desglose total)
-                    const { error: upsertError } = await supabase.from('usuarios').upsert({
-                        email: userEmail,
-                        slug: realSlug,
-                        business_name: datosSocio.business_name,
-                        nombre_persona: datosSocio.nombre_persona,
-                        password: String(datosSocio.password || "auth-via-payment"),
-                        precio: parseInt(datosSocio.precio) || 0,
-                        duracion_turno: parseInt(datosSocio.duracion_turno) || 30,
-                        horarios: datosSocio.horarios || {},
-                        telefono: datosSocio.telefono || null,
-                        plan: 'premium',
-                        tokens: 100000,
-                        access_token: datosSocio.access_token || crypto.randomBytes(16).toString('hex'),
-                        subscription_expiry: vencimiento.toISOString(),
-                        sheet_id: MASTER_SHEET_ID,
-                        metodo_pago: 'mercadopago'
-                    }, { onConflict: 'email' });
-
-                    if (upsertError) {
-                        console.error("❌ Error Supabase:", upsertError.message);
+                        if (upsertError) {
+                            console.error("❌ Error Supabase:", upsertError.message);
+                        } else {
+                            console.log(`🚀 Usuario Premium ${realSlug} activado exitosamente.`);
+                            delete registrosTemporales[userEmail];
+                            delete globalCache[realSlug];
+                        }
                     } else {
-                        console.log(`✨ ¡Usuario Premium ${realSlug} creado/actualizado con éxito!`);
-                        delete registrosTemporales[userEmail];
-                        delete globalCache[realSlug];
+                        console.warn(`⚠️ No se encontraron datos para el mail ${userEmail} en ninguna fuente.`);
                     }
                 }
             }
         }
+
+        // MUY IMPORTANTE: Responder 200 siempre al final del bloque try
         res.sendStatus(200);
+
     } catch (e) {
         console.error("❌ Error crítico Webhook:", e.message);
-        res.sendStatus(200);
+        res.sendStatus(200); // Respondemos 200 igual para que MP no sature el server con reintentos
     }
 });
 
