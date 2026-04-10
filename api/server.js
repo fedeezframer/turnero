@@ -624,10 +624,26 @@ app.post("/create-booking", async (req, res) => {
 // --- REGISTRO Y AUTH ---
 app.post("/api/request-verification", async (req, res) => {
     try {
-        const { email, business, password, plan, precio, duracion_turno, tokens, horarios } = req.body;
+        // CORRECCIÓN: Extraemos 'business_name' que es lo que manda Framer
+        const { 
+            email, 
+            business_name, 
+            password, 
+            plan, 
+            precio, 
+            duracion_turno, 
+            tokens, 
+            horarios 
+        } = req.body;
         
-        if (!email || !business || !password) {
-            return res.status(400).json({ error: "Faltan datos obligatorios (email, negocio o pass)." });
+        // Verificación de logs para debug en Render
+        console.log("📩 Intento de registro para:", email, "Negocio:", business_name);
+
+        // Validación estricta: usamos business_name
+        if (!email || !business_name || !password) {
+            return res.status(400).json({ 
+                error: "Faltan datos obligatorios (email, negocio o pass)." 
+            });
         }
 
         const googleRes = await fetch(APPS_SCRIPT_URL, {
@@ -636,15 +652,19 @@ app.post("/api/request-verification", async (req, res) => {
             body: JSON.stringify({
                 action: "sendCode",
                 email: email.trim().toLowerCase(),
-                usuario: business, // Google espera 'usuario'
-                password, plan, precio, duracion_turno, tokens,
+                usuario: business_name, // Enviamos el nombre correcto a Google
+                password, 
+                plan: plan || "gratis", 
+                precio: precio || 0, 
+                duracion_turno: duracion_turno || 30, 
+                tokens: tokens || 0,
                 horarios: typeof horarios === "string" ? horarios : JSON.stringify(horarios)
             })
         });
 
         const text = await googleRes.text();
         
-        // Buscamos el JSON de forma segura
+        // Extracción segura del JSON de la respuesta de Google
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
         
@@ -656,16 +676,16 @@ app.post("/api/request-verification", async (req, res) => {
         const result = JSON.parse(text.substring(start, end + 1));
         
         if (result.status === "success") {
+            console.log("✅ Código enviado con éxito a:", email);
             res.json({ success: true });
         } else {
             res.status(500).json({ error: result.message || "Error en Google Script" });
         }
     } catch (e) { 
-        console.error("Error en request-verification:", e.message);
+        console.error("🔥 Error en request-verification:", e.message);
         res.status(500).json({ error: "Error de conexión con el servicio de correos." }); 
     }
 });
-
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { 
