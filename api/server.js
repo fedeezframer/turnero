@@ -194,8 +194,7 @@ app.get("/oauth-callback", async (req, res) => {
 
         if (data.access_token) {
             // Guardamos el token de Mercado Pago del cliente en Supabase.
-            // Se eliminó 'mp_status' para evitar el error:
-            // "Could not find the 'mp_status' column of 'usuarios' in the schema cache"
+            // Se eliminó 'mp_status' para evitar el error PGRST204 de columna inexistente.
             const { error: supabaseError } = await supabase
                 .from('usuarios')
                 .update({ 
@@ -205,17 +204,21 @@ app.get("/oauth-callback", async (req, res) => {
 
             if (supabaseError) {
                 console.error("Error al guardar en Supabase:", supabaseError);
-                // Si falla el guardado en la DB, redirigimos con error para que el usuario sepa que algo falló
-                return res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
+                // Si falla el guardado, redirigimos manteniendo el parámetro 'u' para no romper el dashboard
+                return res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error&u=${slug}`);
             }
 
-            // Éxito: Redirigimos al dashboard de Framer indicando que la vinculación fue exitosa
+            // Éxito: Redirigimos al dashboard indicando éxito y pasando el slug en el parámetro 'u'
+            // Esto permite que PlanGuardian reconozca al usuario y valide su plan correctamente.
             console.log(`✅ Cuenta de Mercado Pago vinculada con éxito para el negocio: ${slug}`);
-            res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
+            res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success&u=${slug}`);
         } else {
-            // Si Mercado Pago devuelve un error (por ejemplo, si el 'code' ya expiró o las credenciales de la App son incorrectas)
+            // Si Mercado Pago devuelve un error (ej: code vencido), redirigimos manteniendo el slug si existe
             console.error("Error de Mercado Pago OAuth:", data);
-            res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
+            const errorUrl = slug 
+                ? `https://negosocio.framer.website/dashboard?status=mp_error&u=${slug}`
+                : `https://negosocio.framer.website/dashboard?status=mp_error`;
+            res.redirect(errorUrl);
         }
     } catch (error) {
         // Captura de errores de red o errores críticos de ejecución
