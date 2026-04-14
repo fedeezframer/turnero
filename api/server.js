@@ -169,15 +169,21 @@ app.post("/api/create-preference", async (req, res) => {
 // --- MERCADO PAGO: OAUTH ---
 app.get("/oauth-callback", async (req, res) => {
     const { code, state: slug } = req.query;
-    if (!code || !slug) return res.status(400).send("Datos inválidos.");
+    
+    // Verificación básica de seguridad
+    if (!code || !slug) {
+        console.error("Callback fallido: Faltan parámetros code o slug.");
+        return res.status(400).send("Datos inválidos.");
+    }
 
     try {
+        // Intercambiamos el code por el access_token del cliente
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                client_id: "3207083483590663",
-                client_secret: process.env.MP_CLIENT_SECRET,
+                client_id: process.env.MP_TURNERO_CLIENT_ID, // El ID 3207083483590663
+                client_secret: process.env.MP_TURNERO_CLIENT_SECRET, // El Secret específico de esta App
                 grant_type: "authorization_code",
                 code: code,
                 redirect_uri: "https://framerturnero.onrender.com/oauth-callback"
@@ -185,13 +191,32 @@ app.get("/oauth-callback", async (req, res) => {
         });
 
         const data = await response.json();
+
         if (data.access_token) {
-            await supabase.from('usuarios').update({ mp_access_token: data.access_token }).eq('slug', slug);
+            // Guardamos el token DEL CLIENTE en Supabase
+            // También actualizamos el estado a 'Conectado' para que Framer lo reconozca
+            const { error: supabaseError } = await supabase
+                .from('usuarios')
+                .update({ 
+                    mp_access_token: data.access_token,
+                    mp_status: "Conectado" 
+                })
+                .eq('slug', slug);
+
+            if (supabaseError) {
+                console.error("Error al guardar en Supabase:", supabaseError);
+                return res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
+            }
+
+            // Éxito: Volvemos al dashboard de Framer
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
         } else {
+            // Si MP devuelve error (ej: code vencido o secret mal puesto)
+            console.error("Error de Mercado Pago OAuth:", data);
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
+        console.error("Error crítico en el flujo OAuth:", error);
         res.status(500).send("Error vinculando cuenta.");
     }
 });
