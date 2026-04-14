@@ -170,20 +170,20 @@ app.post("/api/create-preference", async (req, res) => {
 app.get("/oauth-callback", async (req, res) => {
     const { code, state: slug } = req.query;
     
-    // Verificación básica de seguridad
+    // Verificación básica de seguridad: nos aseguramos de tener el código de MP y el slug del usuario
     if (!code || !slug) {
         console.error("Callback fallido: Faltan parámetros code o slug.");
         return res.status(400).send("Datos inválidos.");
     }
 
     try {
-        // Intercambiamos el code por el access_token del cliente
+        // Intercambiamos el code temporal por el access_token definitivo del cliente
         const response = await fetch("https://api.mercadopago.com/oauth/token", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                client_id: process.env.MP_TURNERO_CLIENT_ID, // El ID 3207083483590663
-                client_secret: process.env.MP_TURNERO_CLIENT_SECRET, // El Secret específico de esta App
+                client_id: process.env.MP_TURNERO_CLIENT_ID, // Tu Client ID de la aplicación en MP
+                client_secret: process.env.MP_TURNERO_CLIENT_SECRET, // Tu Client Secret de la aplicación en MP
                 grant_type: "authorization_code",
                 code: code,
                 redirect_uri: "https://framerturnero.onrender.com/oauth-callback"
@@ -193,31 +193,34 @@ app.get("/oauth-callback", async (req, res) => {
         const data = await response.json();
 
         if (data.access_token) {
-            // Guardamos el token DEL CLIENTE en Supabase
-            // También actualizamos el estado a 'Conectado' para que Framer lo reconozca
+            // Guardamos el token de Mercado Pago del cliente en Supabase.
+            // Se eliminó 'mp_status' para evitar el error:
+            // "Could not find the 'mp_status' column of 'usuarios' in the schema cache"
             const { error: supabaseError } = await supabase
                 .from('usuarios')
                 .update({ 
-                    mp_access_token: data.access_token,
-                    mp_status: "Conectado" 
+                    mp_access_token: data.access_token 
                 })
                 .eq('slug', slug);
 
             if (supabaseError) {
                 console.error("Error al guardar en Supabase:", supabaseError);
+                // Si falla el guardado en la DB, redirigimos con error para que el usuario sepa que algo falló
                 return res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
             }
 
-            // Éxito: Volvemos al dashboard de Framer
+            // Éxito: Redirigimos al dashboard de Framer indicando que la vinculación fue exitosa
+            console.log(`✅ Cuenta de Mercado Pago vinculada con éxito para el negocio: ${slug}`);
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_success`);
         } else {
-            // Si MP devuelve error (ej: code vencido o secret mal puesto)
+            // Si Mercado Pago devuelve un error (por ejemplo, si el 'code' ya expiró o las credenciales de la App son incorrectas)
             console.error("Error de Mercado Pago OAuth:", data);
             res.redirect(`https://negosocio.framer.website/dashboard?status=mp_error`);
         }
     } catch (error) {
+        // Captura de errores de red o errores críticos de ejecución
         console.error("Error crítico en el flujo OAuth:", error);
-        res.status(500).send("Error vinculando cuenta.");
+        res.status(500).send("Error interno al intentar vincular la cuenta.");
     }
 });
 
