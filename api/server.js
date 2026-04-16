@@ -1028,6 +1028,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
         let turnosHoy = 0;
         let turnosMesActual = 0;
         let turnosLista = [];
+        // Inicializamos las semanas en 0 para asegurar que el gráfico siempre tenga los 4 pilares
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
@@ -1040,6 +1041,13 @@ app.get("/admin-stats/:slug", async (req, res) => {
             
             const [dia, mes] = partes[0].split("/").map(Number);
             
+            // LÓGICA DE SEMANAS CORREGIDA:
+            // Dividimos el mes en 4 tramos exactos de días
+            let semanaIdx = 0;
+            if (dia > 7 && dia <= 14) semanaIdx = 1;
+            else if (dia > 14 && dia <= 21) semanaIdx = 2;
+            else if (dia > 21) semanaIdx = 3;
+
             // Si el turno pertenece al mes en curso
             if (mes === mesActual) {
                 turnosMesActual++;
@@ -1049,19 +1057,20 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     turnosHoy++;
                 }
 
-                // Clasificación por semanas para el gráfico
-                if (dia <= 7) semanas["Sem 1"]++;
-                else if (dia <= 14) semanas["Sem 2"]++;
-                else if (dia <= 21) semanas["Sem 3"]++;
-                else semanas["Sem 4"]++;
+                // Sumamos al contador de la semana correspondiente
+                const etiquetaSemana = `Sem ${semanaIdx + 1}`;
+                semanas[etiquetaSemana]++;
             }
 
             // Construimos el objeto para la lista de turnos del admin
+            // Agregamos semanaIdx y duracion para el cálculo de horas reales en el componente
             turnosLista.push({ 
                 nombre: r[0], 
                 telefono: r[1], 
                 fecha: `2026-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
                 hora: partes[1], 
+                semanaIdx: semanaIdx,
+                duracion: user.duracion_turno || 60,
                 rawTurno: r[2] 
             });
         });
@@ -1074,6 +1083,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
+                // Generamos el array para el gráfico respetando el orden de las semanas
                 chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
                 businessName: user.business_name,
                 tokens: user.tokens,
