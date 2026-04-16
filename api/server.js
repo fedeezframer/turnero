@@ -10,7 +10,7 @@ const app = express();
 
 // --- CONFIGURACIÓN GLOBAL ---
 const MASTER_SHEET_ID = "1CYF1IJFEKibbkXTKco-o13ZbMo6KpkT5oJj35Z3q4hg";
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwVbT_jlACweYLYJGgWtBNeHUy0yhpl_NE9hfY2LtlLwMYDCFf1kQUXYr-eGxTZ1DVg/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxaUK1vZklb2VeE-mw-6UhgP6hXNsd_F_RZTn8Znv9MFgd84VRjnGxiryR_CE53qwPe/exec";
 const registrosTemporales = {};
 
 app.use(cors({
