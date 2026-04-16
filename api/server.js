@@ -733,6 +733,7 @@ app.post("/api/request-verification", async (req, res) => {
         res.status(500).json({ error: "Error de conexión con el servicio de correos." }); 
     }
 });
+
 app.post("/api/verify-and-register", async (req, res) => {
     try {
         const { 
@@ -761,83 +762,93 @@ app.post("/api/verify-and-register", async (req, res) => {
         const result = await googleRes.json();
 
         if (result.status === "valid") {
-            // 2. Generación de Slug (Identificador único de URL)
-            // Priorizamos el nombre enviado, si no, usamos el que viene del registro de Google
+            // 2. Generación de Slug
             const finalName = business_name || result.usuario || "Negocio";
             const cleanSlug = finalName
                 .toLowerCase()
                 .trim()
                 .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "") // Elimina acentos
-                .replace(/\s+/g, '-')            // Espacios por guiones
-                .replace(/[^a-z0-9-]/g, '');     // Elimina caracteres especiales
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/\s+/g, '-')
+                .replace(/[^a-z0-9-]/g, '');
 
-            // 3. Lógica de Plan y Vencimiento Inicial
+            // 3. Lógica de Plan y Vencimiento
             const isPremium = plan === 'premium';
             let fechaVencimientoInicial = null;
             
             if (isPremium) {
-                // Para registros premium vía código (ej. promos manuales), 
-                // damos 30 días de acceso directo.
                 const ahora = new Date();
                 ahora.setMonth(ahora.getMonth() + 1); 
                 fechaVencimientoInicial = ahora.toISOString();
             }
 
-            // --- GENERACIÓN DE MAGIC TOKEN PARA LOGIN AUTOMÁTICO ---
-            // Este token permitirá que el usuario entre al Dashboard sin loguearse manualmente la primera vez
             const magicToken = crypto.randomBytes(16).toString('hex');
 
-            // 4. Insertar en la tabla de Usuarios de Supabase
-            // Usamos el Slug como identificador principal para el acceso
+            // 4. Insertar en Supabase
             const { error } = await supabase.from('usuarios').insert([{
                 slug: cleanSlug,
                 email: email.trim().toLowerCase(),
                 nombre_persona: nombre_persona ? nombre_persona.trim() : "Dueño",
                 business_name: finalName.trim(),
-                password: String(result.password), // Contraseña generada en el paso anterior
+                password: String(result.password),
                 sheet_id: MASTER_SHEET_ID,
                 precio: parseInt(precio) || 0,
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {},
                 plan: isPremium ? 'premium' : 'gratis',
-                tokens: isPremium ? 100000 : 50, // 50 tokens iniciales para el plan gratis
+                tokens: isPremium ? 100000 : 50,
                 telefono: telefono || null,
                 metodo_pago: isPremium ? 'manual' : 'none',
                 subscription_expiry: fechaVencimientoInicial,
                 excepciones: [],
                 mp_access_token: null,
-                access_token: magicToken // <--- Token para validación de sesión inmediata
+                access_token: magicToken
             }]);
 
             if (error) {
-                // Manejo de error si el Slug (URL) ya está tomado
                 if (error.code === '23505') {
-                    console.warn(`⚠️ Intento de registro duplicado para slug: ${cleanSlug}`);
                     return res.status(400).json({ 
-                        error: "El nombre de este negocio ya está registrado o su URL no está disponible. Intentá con uno ligeramente distinto." 
+                        error: "El nombre de este negocio ya está registrado. Intentá con uno distinto." 
                     });
                 }
                 throw error;
             }
 
-            // 5. Respuesta exitosa incluyendo el TOKEN para la redirección desde Framer
-            console.log(`✨ Nuevo usuario registrado exitosamente: ${cleanSlug} (${email})`);
+            // --- 5. SEÑAL PARA MAIL DE BIENVENIDA (NUEVO) ---
+            try {
+                // No usamos await aquí si no queremos retrasar la respuesta al usuario, 
+                // pero lo recomendable es usarlo para asegurar que la señal salga.
+                await fetch(APPS_SCRIPT_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "text/plain" },
+                    body: JSON.stringify({
+                        action: "welcomeEmail",
+                        email: email.trim().toLowerCase(),
+                        usuario: finalName.trim()
+                    })
+                });
+                console.log(`📧 Mail de bienvenida solicitado para: ${email}`);
+            } catch (mailErr) {
+                console.error("⚠️ Error al solicitar mail de bienvenida:", mailErr.message);
+                // No cortamos el flujo, el usuario ya se registró correctamente.
+            }
+
+            // 6. Respuesta exitosa
+            console.log(`✨ Nuevo usuario registrado exitosamente: ${cleanSlug}`);
             
             res.json({ 
                 success: true, 
                 slug: cleanSlug,
-                at: magicToken, // El frontend recibe esto y lo usa en la URL de redirección (?u=slug&at=token)
+                at: magicToken,
                 message: "¡Cuenta creada con éxito! Redirigiendo al panel..."
             });
 
         } else {
-            // Caso en que el código de email sea incorrecto
-            res.status(400).json({ error: "El código de verificación es incorrecto o ha expirado." });
+            res.status(400).json({ error: "El código de verificación es incorrecto." });
         }
     } catch (e) { 
-        console.error("❌ Error crítico en el proceso de registro final:", e.message);
-        res.status(500).json({ error: "No se pudo completar el registro. Por favor, intentá nuevamente." }); 
+        console.error("❌ Error crítico en registro:", e.message);
+        res.status(500).json({ error: "No se pudo completar el registro." }); 
     }
 });
 
