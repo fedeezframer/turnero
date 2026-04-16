@@ -1,5 +1,6 @@
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
+import fetch from "node-fetch"; // Asegurate de tener node-fetch instalado si usas Node < 18
 
 const getAuth = () => new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -23,7 +24,8 @@ export async function getFullData(slug) {
                 phone: row.get("phone"),
                 name: row.get("name"),
                 semana: row.get("semana"),
-                slug: row.get("slug")
+                slug: row.get("slug"),
+                estado: row.get("estado") // Traemos el estado por si lo necesitas en el front
             }));
     } catch (e) {
         console.error("Error leyendo Sheets:", e.message);
@@ -43,7 +45,7 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // 1. Formateo para la columna "turno" (Ej: 29/03 - 15:30)
+        // 1. Formateo para la columna "turno" (Ej: 29/04 - 15:30)
         const [year, month, day] = data.fecha.split("-");
         const turnoFormateado = `${day}/${month} - ${data.hora}`;
 
@@ -57,14 +59,37 @@ export async function saveToSheets(data) {
         });
 
         // 3. GUARDAR EN EL SHEETS
-        // Agregamos "slug" para identificar de quién es el turno
+        // Agregamos la columna "estado" para que el script de Google sepa qué hacer
         await sheet.addRow({
             name: data.name.trim(),
             phone: data.phone.toString().trim(),
             turno: turnoFormateado,
             semana: fechaRegistro,
-            slug: data.slug // <--- NO OLVIDAR ESTO
+            slug: data.slug,
+            estado: "PENDIENTE" // <--- Esto es clave para que luego cambie a "ENVIADO"
         });
+
+        // 4. DISPARAR NOTIFICACIÓN INMEDIATA (Apps Script)
+        // Esto hace que el mail llegue al instante y no tengas que esperar al cron job
+        if (process.env.APPS_SCRIPT_URL) {
+            try {
+                await fetch(process.env.APPS_SCRIPT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: "newAppointmentEmail",
+                        nombreCliente: data.name.trim(),
+                        fechaHora: turnoFormateado,
+                        adminEmail: "federicomartinezcontacto@gmail.com" // Podrías dynamicizar esto según el slug
+                    })
+                });
+                
+                // Opcional: Podrías volver a entrar al sheet y marcarlo como ENVIADO aquí mismo,
+                // pero si el Apps Script ya lo hace con su propia función, no hace falta.
+            } catch (fetchError) {
+                console.error("Error al contactar Apps Script para el mail:", fetchError.message);
+            }
+        }
 
         return true;
     } catch (e) {
