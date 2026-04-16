@@ -577,11 +577,18 @@ app.get("/get-occupied", async (req, res) => {
     try {
         const slug = getCleanSlug(req.query.slug);
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
+        // Traemos hasta la F para asegurar que leemos toda la fila si fuera necesario
+        const response = await sheets.spreadsheets.values.get({ 
+            spreadsheetId: MASTER_SHEET_ID, 
+            range: "A:F" 
+        });
         const rows = response.data.values || [];
+        // Filtramos por slug (columna E index 4) y devolvemos el turno (columna C index 2)
         const ocupados = rows.filter(row => row[4] === slug).map(row => row[2]);
         res.json({ success: true, ocupados });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 app.post("/create-booking", async (req, res) => {
@@ -599,37 +606,28 @@ app.post("/create-booking", async (req, res) => {
             return res.status(404).json({ success: false, error: "Negocio no encontrado." });
         }
 
+        // --- Verificación de Plan y Tokens ---
         if (user.plan === 'premium') {
             const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
-
             if (!vencimiento || ahoraArg > vencimiento) {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: "Servicio suspendido temporalmente por el administrador." 
-                });
+                return res.status(403).json({ success: false, error: "Servicio suspendido temporalmente." });
             }
         }
-
         if (user.plan === 'gratis' && user.tokens <= 0) {
-            return res.status(403).json({ success: false, error: "Sin tokens disponibles en este negocio." });
+            return res.status(403).json({ success: false, error: "Sin tokens disponibles." });
         }
 
         const sheets = await getSheets();
-        const response = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: "A:E" });
-        const rows = response.data.values || [];
-
-        if (rows.some(row => row[1] === phone.toString().trim() && row[4] === slug)) {
-            return res.status(400).json({ success: false, error: "Ya tenés un turno agendado en este negocio." });
-        }
-
+        
+        // --- 1. GUARDAR EN GOOGLE SHEETS (Incluyendo columna F) ---
         const partes = fecha.split("-");
         const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E",
+            range: "A:F", // Extendemos a la F
             valueInputOption: "RAW",
             requestBody: { 
                 values: [[
@@ -637,10 +635,28 @@ app.post("/create-booking", async (req, res) => {
                     phone.toString().trim(), 
                     textoTurnoNuevo, 
                     fechaHoyReal, 
-                    slug
+                    slug,
+                    "PENDIENTE" // <--- Columna F: Estado inicial
                 ]] 
             }
         });
+
+        // --- 2. DISPARAR EL MAIL (Apps Script) ---
+        try {
+            await fetch(APPS_SCRIPT_URL, {
+                method: "POST",
+                headers: { "Content-Type": "text/plain" }, // Importante para evitar problemas de CORS en Apps Script
+                body: JSON.stringify({
+                    action: "newAppointmentEmail",
+                    nombreCliente: name.trim(),
+                    fechaHora: textoTurnoNuevo,
+                    adminEmail: user.email // Se lo manda al dueño del negocio
+                })
+            });
+        } catch (mailErr) {
+            console.error("Error notificando al Apps Script:", mailErr.message);
+            // No bloqueamos el proceso si el mail falla, pero lo logueamos
+        }
 
         await handleTokenDiscount(slug);
         delete globalCache[slug];
