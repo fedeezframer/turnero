@@ -244,11 +244,10 @@ app.post("/webhook", async (req, res) => {
                 const paymentData = await paymentResponse.json();
 
                 // Verificamos que el pago esté aprobado y tenga metadata de turno
-                // El chequeo 'paymentData.metadata?.slug' es vital para no romper el código con pagos premium
                 if (paymentData.status === "approved" && paymentData.metadata && paymentData.metadata.slug) {
                     const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
-                    // Limpieza segura de slug para evitar errores de formato
+                    // Limpieza segura de slug
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
                     
                     // Formateo de fecha para Google Sheets (DD/MM - HH:mm)
@@ -258,10 +257,10 @@ app.post("/webhook", async (req, res) => {
 
                     const sheets = await getSheets();
                     
-                    // Guardamos el turno en la planilla de Google
+                    // 1. GUARDAR EN GOOGLE SHEETS (Incluyendo columna F: Estado)
                     await sheets.spreadsheets.values.append({
                         spreadsheetId: MASTER_SHEET_ID,
-                        range: "A:E",
+                        range: "A:F", // Extendemos a la F para el estado "PENDIENTE"
                         valueInputOption: "RAW",
                         requestBody: { 
                             values: [[
@@ -269,19 +268,47 @@ app.post("/webhook", async (req, res) => {
                                 telefono ? telefono.toString().trim() : "N/A", 
                                 textoTurnoNuevo, 
                                 fechaHoyReal, 
-                                slug
+                                slug,
+                                "PENDIENTE" // <--- Importante para el sistema de correos
                             ]] 
                         }
                     });
 
-                    // Descontamos el token del plan gratuito (si corresponde)
+                    // 2. DISPARAR NOTIFICACIÓN POR MAIL (Apps Script)
+                    try {
+                        // Buscamos el email del administrador del negocio en Supabase
+                        const { data: userAdmin } = await supabase
+                            .from('usuarios')
+                            .select('email')
+                            .eq('slug', slug)
+                            .single();
+
+                        if (userAdmin && userAdmin.email) {
+                            await fetch(APPS_SCRIPT_URL, {
+                                method: "POST",
+                                headers: { "Content-Type": "text/plain" },
+                                body: JSON.stringify({
+                                    action: "newAppointmentEmail",
+                                    nombreCliente: nombre ? nombre.trim() : "Cliente",
+                                    fechaHora: textoTurnoNuevo,
+                                    adminEmail: userAdmin.email
+                                })
+                            });
+                            console.log(`📧 Notificación de turno enviada a: ${userAdmin.email}`);
+                        }
+                    } catch (mailErr) {
+                        console.error("⚠️ Error al intentar disparar el mail del webhook:", mailErr.message);
+                    }
+
+                    // 3. DESCONTAR TOKEN (si es plan gratis)
                     if (typeof handleTokenDiscount === 'function') {
                         await handleTokenDiscount(slug);
                     }
                     
-                    // Limpieza de caché para que los datos nuevos se vean reflejados
+                    // Limpieza de caché
                     delete globalCache[slug];
-                    console.log(`✅ Turno agendado exitosamente para el negocio: ${slug}`);
+                    console.log(`✅ Turno pagado y agendado exitosamente para: ${slug}`);
+
                 } else {
                     console.log("ℹ️ Pago recibido sin metadata de turno. Se ignora (posible cobro de suscripción).");
                 }
@@ -293,7 +320,6 @@ app.post("/webhook", async (req, res) => {
             const subId = body.data?.id || body.id;
             
             if (subId) {
-                // Consultamos el estado real en la API de Mercado Pago
                 const response = await fetch(`https://api.mercadopago.com/preapproval/${subId}`, {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
@@ -301,11 +327,8 @@ app.post("/webhook", async (req, res) => {
 
                 console.log("🔍 Detalles de suscripción recuperados:", JSON.stringify(subData));
 
-                // Si el pago está autorizado o activo, procedemos a activar
                 if (subData.status === "authorized" || subData.status === "active") {
                     
-                    // PRIORIDAD 1: Usamos el external_reference (donde ahora enviamos el slug)
-                    // PRIORIDAD 2: Buscamos el slug en la back_url como respaldo
                     let slugParaActivar = subData.external_reference;
 
                     if (!slugParaActivar && subData.back_url) {
@@ -314,18 +337,16 @@ app.post("/webhook", async (req, res) => {
                     }
                     
                     if (!slugParaActivar) {
-                        console.error("❌ Error: No se pudo obtener el slug del negocio (external_reference vacío).");
+                        console.error("❌ Error: No se pudo obtener el slug del negocio.");
                         return res.sendStatus(200); 
                     }
 
                     console.log(`🚀 Activando Plan Premium para el slug: ${slugParaActivar}`);
 
-                    // Calculamos el vencimiento (1 mes + 2 días de gracia para evitar cortes bruscos)
                     const vencimiento = new Date();
                     vencimiento.setMonth(vencimiento.getMonth() + 1);
                     vencimiento.setDate(vencimiento.getDate() + 2);
 
-                    // ACTUALIZACIÓN EN SUPABASE USANDO EL SLUG
                     const { data, error: updateError } = await supabase
                         .from('usuarios')
                         .update({
@@ -342,11 +363,8 @@ app.post("/webhook", async (req, res) => {
                     } else if (data && data.length > 0) {
                         console.log(`✨ ¡CUENTA ACTIVADA! El negocio ${data[0].business_name} ya es Premium.`);
                         delete globalCache[slugParaActivar];
-                    } else {
-                        console.warn(`⚠️ Se recibió pago para el slug ${slugParaActivar} pero no existe en la DB.`);
                     }
 
-                    // Limpieza de seguridad en registros temporales (si usas el email como clave ahí)
                     const rawEmail = subData.payer_email || (subData.payer && subData.payer.email);
                     if (rawEmail && typeof registrosTemporales !== 'undefined') {
                         delete registrosTemporales[rawEmail.toLowerCase().trim()];
@@ -355,12 +373,10 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // Siempre respondemos 200 a Mercado Pago para frenar los reintentos
         res.sendStatus(200);
 
     } catch (e) {
         console.error("🔥 Error crítico en el Webhook:", e.message);
-        // Respondemos 200 de todas formas para evitar que MP nos sature a reintentos fallidos
         res.sendStatus(200);
     }
 });
