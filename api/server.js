@@ -1026,14 +1026,17 @@ app.get("/admin-stats/:slug", async (req, res) => {
     const slug = getCleanSlug(req.params.slug);
     const now = Date.now();
 
-    // 1. Verificación de Caché
-    // Si los datos están en caché y no pasaron más de 20 segundos, los devolvemos rápido.
     if (globalCache[slug] && (now - globalCache[slug].timestamp < CACHE_DURATION)) {
         return res.json(globalCache[slug].data);
     }
 
     try {
-        // 2. Obtener datos del usuario en Supabase
+        try {
+            await supabase.rpc("recargar_tokens_gratis");
+        } catch (tokenError) {
+            console.error("⚠️ Error al recargar tokens:", tokenError.message);
+        }
+
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
@@ -1044,18 +1047,14 @@ app.get("/admin-stats/:slug", async (req, res) => {
             return res.status(404).json({ error: "Usuario no encontrado" });
         }
 
-        // 3. Lógica de Control de Suscripción Premium (Con Red de Seguridad para Magic Login)
         const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
         
         if (user.plan === 'premium') {
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
             
-            // RED DE SEGURIDAD: Si tiene un access_token (o sea, acaba de entrar por login/pago), 
-            // le permitimos ver las stats aunque el vencimiento esté al límite o nulo.
             const hasActiveMagicToken = user.access_token !== null;
 
             if (!hasActiveMagicToken) {
-                // Si NO es un Magic Login, validamos el vencimiento normalmente
                 if (!vencimiento || ahoraArg > vencimiento) {
                     return res.status(402).json({ 
                         error: "Suscripción Premium vencida",
@@ -1067,7 +1066,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
             }
         }
 
-        // 4. Obtener turnos desde Google Sheets
+        // 5. Obtener turnos desde Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: MASTER_SHEET_ID, 
@@ -1075,52 +1074,42 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const allRows = response.data.values || [];
-        // Filtramos las filas: mantenemos el encabezado y las que pertenecen a este negocio (slug)
+
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
-        // 5. Procesamiento de Estadísticas
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
         
         let turnosHoy = 0;
         let turnosMesActual = 0;
         let turnosLista = [];
-        // Inicializamos las semanas en 0 para asegurar que el gráfico siempre tenga los 4 pilares
+
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
-            // Saltamos encabezado o filas vacías
             if (i === 0 || !r[2]) return;
 
-            // El formato esperado en la celda es "DD/MM - HH:mm"
             const partes = r[2].toString().split(" - ");
             if (partes.length < 2) return;
             
             const [dia, mes] = partes[0].split("/").map(Number);
             
-            // LÓGICA DE SEMANAS CORREGIDA:
-            // Dividimos el mes en 4 tramos exactos de días
             let semanaIdx = 0;
             if (dia > 7 && dia <= 14) semanaIdx = 1;
             else if (dia > 14 && dia <= 21) semanaIdx = 2;
             else if (dia > 21) semanaIdx = 3;
 
-            // Si el turno pertenece al mes en curso
             if (mes === mesActual) {
                 turnosMesActual++;
                 
-                // Si es hoy
                 if (dia === diaHoyNum) {
                     turnosHoy++;
                 }
 
-                // Sumamos al contador de la semana correspondiente
                 const etiquetaSemana = `Sem ${semanaIdx + 1}`;
                 semanas[etiquetaSemana]++;
             }
 
-            // Construimos el objeto para la lista de turnos del admin
-            // Agregamos semanaIdx y duracion para el cálculo de horas reales en el componente
             turnosLista.push({ 
                 nombre: r[0], 
                 telefono: r[1], 
@@ -1132,16 +1121,17 @@ app.get("/admin-stats/:slug", async (req, res) => {
             });
         });
 
-        // 6. Estructura final de respuesta
         const finalData = {
             stats: {
                 nombre_persona: user.nombre_persona,
-                turnosHoy, 
+                turnosHoy: turnosHoy,
                 turnosMes: turnosMesActual,
                 ingresosEstimados: turnosMesActual * (user.precio || 0),
                 promedioDiario: diaHoyNum > 0 ? Math.round((turnosMesActual * (user.precio || 0)) / diaHoyNum) : 0,
-                // Generamos el array para el gráfico respetando el orden de las semanas
-                chartData: Object.keys(semanas).map(key => ({ label: key, turnos: semanas[key] })),
+                chartData: Object.keys(semanas).map(key => ({
+                    label: key,
+                    turnos: semanas[key]
+                })),
                 businessName: user.business_name,
                 tokens: user.tokens,
                 horarios: user.horarios,
@@ -1155,13 +1145,15 @@ app.get("/admin-stats/:slug", async (req, res) => {
                     vencimiento: user.subscription_expiry,
                     excepciones: user.excepciones || [] 
                 },
-                // Invertimos la lista para mostrar los más recientes arriba
                 turnosLista: turnosLista.reverse()
             }
         };
 
-        // 7. Guardar en caché y enviar
-        globalCache[slug] = { timestamp: now, data: finalData };
+        globalCache[slug] = {
+            timestamp: now,
+            data: finalData
+        };
+
         res.json(finalData);
 
     } catch (e) { 
