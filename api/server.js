@@ -587,7 +587,64 @@ app.post("/api/create-subscription", async (req, res) => {
         });
     }
 });
-    
+
+app.post("/api/system/refresh-tokens", async (req, res) => {
+    try {
+        const now = new Date()
+
+        const { data: users, error } = await supabase
+            .from("usuarios")
+            .select("*")
+
+        if (error) throw error
+
+        for (const user of users) {
+            // --- GRATIS: recarga mensual ---
+            if (user.plan === "gratis") {
+                const last = new Date(user.last_token_refresh || 0)
+                const diffDays = (now - last) / (1000 * 60 * 60 * 24)
+
+                if (diffDays >= 30) {
+                    await supabase
+                        .from("usuarios")
+                        .update({
+                            tokens: 25, // 🔥 reset, no acumulativo
+                            last_token_refresh: now.toISOString()
+                        })
+                        .eq("id", user.id)
+
+                    console.log(`🔄 Tokens reseteados: ${user.slug}`)
+                }
+            }
+
+            // --- PREMIUM: expiración ---
+            if (user.plan === "premium") {
+                const expiry = user.subscription_expiry
+                    ? new Date(user.subscription_expiry)
+                    : null
+
+                if (!expiry || now > expiry) {
+                    await supabase
+                        .from("usuarios")
+                        .update({
+                            plan: "gratis",
+                            tokens: 25,
+                            last_token_refresh: now.toISOString()
+                        })
+                        .eq("id", user.id)
+
+                    console.log(`⬇️ Usuario degradado: ${user.slug}`)
+                }
+            }
+        }
+
+        res.json({ success: true })
+    } catch (e) {
+        console.error(e)
+        res.status(500).json({ error: "Error sistema tokens" })
+    }
+})
+
 // --- GESTIÓN DE TURNOS ---
 app.get("/get-occupied", async (req, res) => {
     try {
@@ -812,7 +869,7 @@ app.post("/api/verify-and-register", async (req, res) => {
                 duracion_turno: parseInt(duracion_turno) || 30,
                 horarios: horarios || {},
                 plan: isPremium ? 'premium' : 'gratis',
-                tokens: isPremium ? 100000 : 50,
+                tokens: isPremium ? 100000 : 30,
                 telefono: telefono || null,
                 metodo_pago: isPremium ? 'manual' : 'none',
                 subscription_expiry: fechaVencimientoInicial,
