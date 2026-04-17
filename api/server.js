@@ -588,8 +588,14 @@ app.post("/api/create-subscription", async (req, res) => {
     }
 });
 
-app.post("/api/system/refresh-tokens", async (req, res) => {
+app.all("/api/system/refresh-tokens", async (req, res) => {
     try {
+        // 🔐 Seguridad con API KEY
+        const apiKey = req.headers["x-api-key"]
+        if (!apiKey || apiKey !== process.env.CRON_SECRET) {
+            return res.status(401).json({ error: "Unauthorized" })
+        }
+
         const now = new Date()
 
         const { data: users, error } = await supabase
@@ -598,30 +604,55 @@ app.post("/api/system/refresh-tokens", async (req, res) => {
 
         if (error) throw error
 
+        let updatedCount = 0
+
         for (const user of users) {
             // --- GRATIS: recarga mensual ---
             if (user.plan === "gratis") {
-                const last = new Date(user.last_token_refresh || 0)
-                const diffDays = (now - last) / (1000 * 60 * 60 * 24)
+                let last = null
+
+                try {
+                    last = user.last_token_refresh
+                        ? new Date(user.last_token_refresh)
+                        : null
+                } catch (e) {
+                    last = null
+                }
+
+                const diffDays = last
+                    ? (now - last) / (1000 * 60 * 60 * 24)
+                    : 999 // fuerza recarga si nunca tuvo
 
                 if (diffDays >= 30) {
+                    const newTokens = (user.tokens || 0) + 25
+
                     await supabase
                         .from("usuarios")
                         .update({
-                            tokens: 25, // 🔥 reset, no acumulativo
+                            tokens: newTokens,
                             last_token_refresh: now.toISOString()
                         })
                         .eq("id", user.id)
 
-                    console.log(`🔄 Tokens reseteados: ${user.slug}`)
+                    console.log(
+                        `🔄 Tokens sumados: ${user.slug} → ${user.tokens} + 25 = ${newTokens}`
+                    )
+
+                    updatedCount++
                 }
             }
 
             // --- PREMIUM: expiración ---
             if (user.plan === "premium") {
-                const expiry = user.subscription_expiry
-                    ? new Date(user.subscription_expiry)
-                    : null
+                let expiry = null
+
+                try {
+                    expiry = user.subscription_expiry
+                        ? new Date(user.subscription_expiry)
+                        : null
+                } catch (e) {
+                    expiry = null
+                }
 
                 if (!expiry || now > expiry) {
                     await supabase
@@ -634,13 +665,19 @@ app.post("/api/system/refresh-tokens", async (req, res) => {
                         .eq("id", user.id)
 
                     console.log(`⬇️ Usuario degradado: ${user.slug}`)
+
+                    updatedCount++
                 }
             }
         }
 
-        res.json({ success: true })
+        res.json({
+            success: true,
+            message: `Proceso completado`,
+            usersUpdated: updatedCount
+        })
     } catch (e) {
-        console.error(e)
+        console.error("❌ Error sistema tokens:", e.message)
         res.status(500).json({ error: "Error sistema tokens" })
     }
 })
