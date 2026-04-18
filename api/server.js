@@ -754,16 +754,17 @@ const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: MASTER_SHEET_ID,
-            range: "A:F",
+            range: "A:G",
             valueInputOption: "RAW",
             requestBody: {
-                values: [[
+               values: [[
                     name.trim(),
                     phone.toString().trim(),
                     textoTurnoNuevo,
                     fechaHoyReal,
                     slug,
-                    "PENDIENTE"
+                    email ? email.trim() : "",
+                   "PENDIENTE"
                 ]]
             }
         });
