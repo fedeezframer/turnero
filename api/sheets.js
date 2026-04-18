@@ -1,6 +1,6 @@
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
-import fetch from "node-fetch"; // Asegurate de tener node-fetch instalado si usas Node < 18
+import fetch from "node-fetch";
 
 const getAuth = () => new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -16,16 +16,16 @@ export async function getFullData(slug) {
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
         
-        // Filtramos por slug para que un negocio no vea los turnos de otro
         return rows
             .filter(row => row.get("slug") === slug)
             .map(row => ({
                 turno: row.get("turno"), 
                 phone: row.get("phone"),
                 name: row.get("name"),
+                email: row.get("email"), // 🔥 NUEVO
                 semana: row.get("semana"),
                 slug: row.get("slug"),
-                estado: row.get("estado") // Traemos el estado por si lo necesitas en el front
+                estado: row.get("estado")
             }));
     } catch (e) {
         console.error("Error leyendo Sheets:", e.message);
@@ -45,11 +45,9 @@ export async function saveToSheets(data) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // 1. Formateo para la columna "turno" (Ej: 29/04 - 15:30)
         const [year, month, day] = data.fecha.split("-");
         const turnoFormateado = `${day}/${month} - ${data.hora}`;
 
-        // 2. FECHA DE REGISTRO (Crucial para las Stats del Admin)
         const ahora = new Date();
         const fechaRegistro = ahora.toLocaleDateString('es-AR', {
             timeZone: 'America/Argentina/Buenos_Aires',
@@ -58,19 +56,16 @@ export async function saveToSheets(data) {
             year: 'numeric'
         });
 
-        // 3. GUARDAR EN EL SHEETS
-        // Agregamos la columna "estado" para que el script de Google sepa qué hacer
         await sheet.addRow({
             name: data.name.trim(),
             phone: data.phone.toString().trim(),
             turno: turnoFormateado,
             semana: fechaRegistro,
             slug: data.slug,
-            estado: "PENDIENTE" // <--- Esto es clave para que luego cambie a "ENVIADO"
+            email: data.email ? data.email.trim() : "", // 🔥 NUEVO
+            estado: "PENDIENTE"
         });
 
-        // 4. DISPARAR NOTIFICACIÓN INMEDIATA (Apps Script)
-        // Esto hace que el mail llegue al instante y no tengas que esperar al cron job
         if (process.env.APPS_SCRIPT_URL) {
             try {
                 await fetch(process.env.APPS_SCRIPT_URL, {
@@ -80,12 +75,10 @@ export async function saveToSheets(data) {
                         action: "newAppointmentEmail",
                         nombreCliente: data.name.trim(),
                         fechaHora: turnoFormateado,
-                        adminEmail: "federicomartinezcontacto@gmail.com" // Podrías dynamicizar esto según el slug
+                        adminEmail: "federicomartinezcontacto@gmail.com",
+                        emailCliente: data.email // 🔥 CLAVE
                     })
                 });
-                
-                // Opcional: Podrías volver a entrar al sheet y marcarlo como ENVIADO aquí mismo,
-                // pero si el Apps Script ya lo hace con su propia función, no hace falta.
             } catch (fetchError) {
                 console.error("Error al contactar Apps Script para el mail:", fetchError.message);
             }
