@@ -353,7 +353,6 @@ app.post("/webhook", async (req, res) => {
                             plan: 'premium',
                             tokens: 100000, 
                             subscription_expiry: vencimiento.toISOString(),
-                            metodo_pago: 'mercadopago'
                         })
                         .eq('slug', slugParaActivar)
                         .select();
