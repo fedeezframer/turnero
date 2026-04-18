@@ -702,7 +702,7 @@ app.get("/get-occupied", async (req, res) => {
 
 app.post("/create-booking", async (req, res) => {
     try {
-        const { name, phone, fecha, hora, slug: rawSlug } = req.body;
+const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
 
         const { data: user, error: userError } = await supabase
