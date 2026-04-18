@@ -23,7 +23,7 @@ export async function getFullData(slug) {
                 phone: row.get("phone"),
                 name: row.get("name"),
                 email: row.get("email"), // 🔥 NUEVO
-                semana: row.get("semana"),
+                reserva: row.get("reserva"),
                 slug: row.get("slug"),
                 estado: row.get("estado")
             }));
@@ -60,10 +60,10 @@ export async function saveToSheets(data) {
             name: data.name.trim(),
             phone: data.phone.toString().trim(),
             turno: turnoFormateado,
-            semana: fechaRegistro,
+            reserva: fechaRegistro, // ✅ CLAVE
             slug: data.slug,
-            email: data.email ? data.email.trim() : "", // 🔥 NUEVO
-            estado: "PENDIENTE"
+            estado: "PENDIENTE",
+            email: data.email ? data.email.trim() : ""
         });
 
         if (process.env.APPS_SCRIPT_URL) {
