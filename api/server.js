@@ -753,21 +753,21 @@ const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
 
         await sheets.spreadsheets.values.append({
-            spreadsheetId: MASTER_SHEET_ID,
-            range: "A:G",
-            valueInputOption: "RAW",
-            requestBody: {
-               values: [[
-                    name.trim(),
-                    phone.toString().trim(),
-                    textoTurnoNuevo,
-                    fechaHoyReal,
-                    slug,
-                    email ? email.trim() : "",
-                   "PENDIENTE"
-                ]]
-            }
-        });
+    spreadsheetId: MASTER_SHEET_ID,
+    range: "A:G",
+    valueInputOption: "RAW",
+    requestBody: {
+        values: [[
+            name.trim(),                      // A
+            phone.toString().trim(),          // B
+            textoTurnoNuevo,                  // C
+            fechaHoyReal,                     // D (reserva)
+            slug,                             // E
+            "PENDIENTE",                      // F (estado) ✅
+            email ? email.trim() : ""         // G (email) ✅
+        ]]
+    }
+});
 
         // --- 2. DISPARAR EL MAIL (Apps Script) ---
         try {
