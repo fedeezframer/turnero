@@ -715,20 +715,38 @@ app.post("/create-booking", async (req, res) => {
             return res.status(404).json({ success: false, error: "Negocio no encontrado." });
         }
 
+        // --- 🔒 BLOQUEO SI REQUIERE PAGO ---
+        const requierePago = user.mp_access_token && (user.metodo_pago === "sena" || user.metodo_pago === "total");
+
+        if (requierePago) {
+            return res.status(403).json({
+                success: false,
+                error: "Este turno requiere pago previo. Debes completar el pago antes de reservar."
+            });
+        }
+
         // --- Verificación de Plan y Tokens ---
         if (user.plan === 'premium') {
             const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
+
             if (!vencimiento || ahoraArg > vencimiento) {
-                return res.status(403).json({ success: false, error: "Servicio suspendido temporalmente." });
+                return res.status(403).json({
+                    success: false,
+                    error: "Servicio suspendido temporalmente."
+                });
             }
         }
+
         if (user.plan === 'gratis' && user.tokens <= 0) {
-            return res.status(403).json({ success: false, error: "Sin tokens disponibles." });
+            return res.status(403).json({
+                success: false,
+                error: "Sin tokens disponibles."
+            });
         }
 
         const sheets = await getSheets();
-        
+
         // --- 1. GUARDAR EN GOOGLE SHEETS (Incluyendo columna F) ---
         const partes = fecha.split("-");
         const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
@@ -736,17 +754,17 @@ app.post("/create-booking", async (req, res) => {
 
         await sheets.spreadsheets.values.append({
             spreadsheetId: MASTER_SHEET_ID,
-            range: "A:F", // Extendemos a la F
+            range: "A:F",
             valueInputOption: "RAW",
-            requestBody: { 
+            requestBody: {
                 values: [[
-                    name.trim(), 
-                    phone.toString().trim(), 
-                    textoTurnoNuevo, 
-                    fechaHoyReal, 
+                    name.trim(),
+                    phone.toString().trim(),
+                    textoTurnoNuevo,
+                    fechaHoyReal,
                     slug,
-                    "PENDIENTE" // <--- Columna F: Estado inicial
-                ]] 
+                    "PENDIENTE"
+                ]]
             }
         });
 
@@ -754,26 +772,27 @@ app.post("/create-booking", async (req, res) => {
         try {
             await fetch(APPS_SCRIPT_URL, {
                 method: "POST",
-                headers: { "Content-Type": "text/plain" }, // Importante para evitar problemas de CORS en Apps Script
+                headers: { "Content-Type": "text/plain" },
                 body: JSON.stringify({
                     action: "newAppointmentEmail",
                     nombreCliente: name.trim(),
                     fechaHora: textoTurnoNuevo,
-                    adminEmail: user.email // Se lo manda al dueño del negocio
+                    adminEmail: user.email
                 })
             });
         } catch (mailErr) {
             console.error("Error notificando al Apps Script:", mailErr.message);
-            // No bloqueamos el proceso si el mail falla, pero lo logueamos
         }
 
         await handleTokenDiscount(slug);
+
         delete globalCache[slug];
+
         res.json({ success: true });
 
-    } catch (e) { 
+    } catch (e) {
         console.error("Error en create-booking:", e.message);
-        res.status(500).json({ error: e.message }); 
+        res.status(500).json({ error: e.message });
     }
 });
 
