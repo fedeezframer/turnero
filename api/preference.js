@@ -1,3 +1,5 @@
+import { MercadoPagoConfig, Preference } from "mercadopago";
+
 export async function createPreference(req, res) {
     try {
         const { nombre, telefono, fecha, hora, slug } = req.body;
