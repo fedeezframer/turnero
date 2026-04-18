@@ -778,7 +778,8 @@ const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
                     action: "newAppointmentEmail",
                     nombreCliente: name.trim(),
                     fechaHora: textoTurnoNuevo,
-                    adminEmail: user.email
+                    adminEmail: user.email,         // ← agregá la coma
+                    emailCliente: email             // ← nueva línea
                 })
             });
         } catch (mailErr) {
