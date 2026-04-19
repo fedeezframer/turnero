@@ -87,7 +87,7 @@ app.get("/", (req, res) => {
 // --- MERCADO PAGO: PREFERENCIA ---
 app.post("/api/create-preference", async (req, res) => {
     try {
-        const { name, phone, fecha, hora, slug } = req.body;
+        const { name, phone, email, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
         const { data: user, error: userError } = await supabase
@@ -140,14 +140,15 @@ app.post("/api/create-preference", async (req, res) => {
                     quantity: 1,
                     currency_id: "ARS"
                 }],
-                metadata: { 
+            metadata: { 
                     nombre: name, 
-                    telefono: phone, 
+                    telefono: phone,
+                    email: email || "", 
                     fecha: fecha, 
                     hora: hora, 
                     slug: cleanSlug,
                     tipo_pago: user.metodo_pago || 'total'
-                },
+                    },
                 notification_url: "https://framerturnero.onrender.com/webhook",
                 back_urls: { 
                     success: "https://negosocio.framer.website/success",
