@@ -87,7 +87,7 @@ app.get("/", (req, res) => {
 // --- MERCADO PAGO: PREFERENCIA ---
 app.post("/api/create-preference", async (req, res) => {
     try {
-        const { name, phone, email, fecha, hora, slug } = req.body;
+        const { nombre, telefono, email, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
 
         const { data: user, error: userError } = await supabase
