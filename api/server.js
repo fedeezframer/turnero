@@ -701,34 +701,32 @@ app.get("/get-occupied", async (req, res) => {
 
 app.post("/create-booking", async (req, res) => {
     try {
-const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
+        const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
         const slug = getCleanSlug(rawSlug);
-
+ 
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
             .eq('slug', slug)
             .single();
-
+ 
         if (userError || !user) {
             return res.status(404).json({ success: false, error: "Negocio no encontrado." });
         }
-
+ 
         // --- 🔒 BLOQUEO SI REQUIERE PAGO ---
         const requierePago = user.mp_access_token && (user.metodo_pago === "sena" || user.metodo_pago === "total");
-
         if (requierePago) {
             return res.status(403).json({
                 success: false,
                 error: "Este turno requiere pago previo. Debes completar el pago antes de reservar."
             });
         }
-
+ 
         // --- Verificación de Plan y Tokens ---
         if (user.plan === 'premium') {
             const ahoraArg = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
-
             if (!vencimiento || ahoraArg > vencimiento) {
                 return res.status(403).json({
                     success: false,
@@ -736,38 +734,68 @@ const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
                 });
             }
         }
-
+ 
         if (user.plan === 'gratis' && user.tokens <= 0) {
             return res.status(403).json({
                 success: false,
                 error: "Sin tokens disponibles."
             });
         }
-
+ 
         const sheets = await getSheets();
-
-        // --- 1. GUARDAR EN GOOGLE SHEETS (Incluyendo columna F) ---
+ 
+        // --- ✅ VALIDACIÓN ANTI-DUPLICADO ---
+        // Lee todas las filas del sheet y verifica si ya existe un turno
+        // para este cliente (mismo nombre + mismo teléfono) bajo este slug.
+        // Si existe, devuelve 400 → el frontend redirige al /alert automáticamente.
+        const existingData = await sheets.spreadsheets.values.get({
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:E"
+        });
+ 
+        const existingRows = existingData.data.values || [];
+ 
+        const yaExiste = existingRows.some(row => {
+            const nombreFila = row[0]?.toString().toLowerCase().trim();
+            const phoneFila  = row[1]?.toString().trim();
+            const slugFila   = row[4]?.toString().toLowerCase().trim();
+ 
+            return (
+                nombreFila === name.trim().toLowerCase() &&
+                phoneFila  === phone.toString().trim() &&
+                slugFila   === slug
+            );
+        });
+ 
+        if (yaExiste) {
+            return res.status(400).json({
+                success: false,
+                error: "Ya tenés un turno agendado. Solo podés tener un turno activo a la vez."
+            });
+        }
+ 
+        // --- 1. GUARDAR EN GOOGLE SHEETS ---
         const partes = fecha.split("-");
         const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
         const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-
+ 
         await sheets.spreadsheets.values.append({
-    spreadsheetId: MASTER_SHEET_ID,
-    range: "A:G",
-    valueInputOption: "RAW",
-    requestBody: {
-        values: [[
-            name.trim(),                      // A
-            phone.toString().trim(),          // B
-            textoTurnoNuevo,                  // C
-            fechaHoyReal,                     // D (reserva)
-            slug,                             // E
-            "PENDIENTE",                      // F (estado) ✅
-            email ? email.trim() : ""         // G (email) ✅
-        ]]
-    }
-});
-
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:G",
+            valueInputOption: "RAW",
+            requestBody: {
+                values: [[
+                    name.trim(),                      // A
+                    phone.toString().trim(),          // B
+                    textoTurnoNuevo,                  // C
+                    fechaHoyReal,                     // D (fecha de reserva)
+                    slug,                             // E
+                    "PENDIENTE",                      // F (estado)
+                    email ? email.trim() : ""         // G (email del cliente)
+                ]]
+            }
+        });
+ 
         // --- 2. DISPARAR EL MAIL (Apps Script) ---
         try {
             await fetch(APPS_SCRIPT_URL, {
@@ -777,25 +805,25 @@ const { name, phone, email, fecha, hora, slug: rawSlug } = req.body;
                     action: "newAppointmentEmail",
                     nombreCliente: name.trim(),
                     fechaHora: textoTurnoNuevo,
-                    adminEmail: user.email,         // ← agregá la coma
-                    emailCliente: email             // ← nueva línea
+                    adminEmail: user.email,
+                    emailCliente: email ? email.trim() : ""
                 })
             });
         } catch (mailErr) {
             console.error("Error notificando al Apps Script:", mailErr.message);
         }
-
+ 
         await handleTokenDiscount(slug);
-
         delete globalCache[slug];
-
+ 
         res.json({ success: true });
-
+ 
     } catch (e) {
         console.error("Error en create-booking:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
+ 
 
 // --- REGISTRO Y AUTH ---
 app.post("/api/request-verification", async (req, res) => {
