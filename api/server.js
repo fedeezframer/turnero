@@ -229,10 +229,10 @@ app.get("/oauth-callback", async (req, res) => {
 
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
-
+ 
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
-
+ 
         // --- A. LÓGICA PARA PAGOS DE TURNOS INDIVIDUALES (SEÑAS/TOTALES) ---
         if (query.topic === "payment" || body.type === "payment") {
             const paymentId = query.id || body.data?.id;
@@ -242,47 +242,44 @@ app.post("/webhook", async (req, res) => {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const paymentData = await paymentResponse.json();
-
-                // Verificamos que el pago esté aprobado y tenga metadata de turno
+ 
                 if (paymentData.status === "approved" && paymentData.metadata && paymentData.metadata.slug) {
-                    const { nombre, telefono, fecha, hora, slug: rawSlug } = paymentData.metadata;
+                    // ✅ FIX: se agrega email a la desestructuración del metadata
+                    const { nombre, telefono, email, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
-                    // Limpieza segura de slug
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
                     
-                    // Formateo de fecha para Google Sheets (DD/MM - HH:mm)
-                    const partes = fecha.split("-"); // Asumiendo YYYY-MM-DD
+                    const partes = fecha.split("-");
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
                     const fechaHoyReal = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-
+ 
                     const sheets = await getSheets();
                     
-                    // 1. GUARDAR EN GOOGLE SHEETS (Incluyendo columna F: Estado)
+                    // ✅ FIX: se extiende rango a A:G y se agrega email en columna G
                     await sheets.spreadsheets.values.append({
                         spreadsheetId: MASTER_SHEET_ID,
-                        range: "A:F", // Extendemos a la F para el estado "PENDIENTE"
+                        range: "A:G",
                         valueInputOption: "RAW",
                         requestBody: { 
                             values: [[
-                                nombre ? nombre.trim() : "Cliente", 
-                                telefono ? telefono.toString().trim() : "N/A", 
-                                textoTurnoNuevo, 
-                                fechaHoyReal, 
+                                nombre ? nombre.trim() : "Cliente",
+                                telefono ? telefono.toString().trim() : "N/A",
+                                textoTurnoNuevo,
+                                fechaHoyReal,
                                 slug,
-                                "PENDIENTE" // <--- Importante para el sistema de correos
+                                "PENDIENTE",
+                                email ? email.trim() : ""  // ✅ columna G
                             ]] 
                         }
                     });
-
-                    // 2. DISPARAR NOTIFICACIÓN POR MAIL (Apps Script)
+ 
                     try {
-                        // Buscamos el email del administrador del negocio en Supabase
                         const { data: userAdmin } = await supabase
                             .from('usuarios')
                             .select('email')
                             .eq('slug', slug)
                             .single();
-
+ 
                         if (userAdmin && userAdmin.email) {
                             await fetch(APPS_SCRIPT_URL, {
                                 method: "POST",
@@ -291,30 +288,32 @@ app.post("/webhook", async (req, res) => {
                                     action: "newAppointmentEmail",
                                     nombreCliente: nombre ? nombre.trim() : "Cliente",
                                     fechaHora: textoTurnoNuevo,
-                                    adminEmail: userAdmin.email
+                                    adminEmail: userAdmin.email,
+                                    emailCliente: email ? email.trim() : ""  // ✅ FIX: email de confirmación al cliente
                                 })
                             });
-                            console.log(`📧 Notificación de turno enviada a: ${userAdmin.email}`);
+                            console.log(`📧 Notificación enviada al admin: ${userAdmin.email}`);
+                            if (email) {
+                                console.log(`📧 Confirmación enviada al cliente: ${email}`);
+                            }
                         }
                     } catch (mailErr) {
                         console.error("⚠️ Error al intentar disparar el mail del webhook:", mailErr.message);
                     }
-
-                    // 3. DESCONTAR TOKEN (si es plan gratis)
+ 
                     if (typeof handleTokenDiscount === 'function') {
                         await handleTokenDiscount(slug);
                     }
                     
-                    // Limpieza de caché
                     delete globalCache[slug];
                     console.log(`✅ Turno pagado y agendado exitosamente para: ${slug}`);
-
+ 
                 } else {
                     console.log("ℹ️ Pago recibido sin metadata de turno. Se ignora (posible cobro de suscripción).");
                 }
             }
         }
-
+ 
         // --- B. LÓGICA PARA SUSCRIPCIÓN PREMIUM (ACTIVACIÓN POR SLUG) ---
         if (body.type === "subscription_preapproval" || body.type === "subscription_authorized_payment") {
             const subId = body.data?.id || body.id;
@@ -324,13 +323,13 @@ app.post("/webhook", async (req, res) => {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const subData = await response.json();
-
+ 
                 console.log("🔍 Detalles de suscripción recuperados:", JSON.stringify(subData));
-
+ 
                 if (subData.status === "authorized" || subData.status === "active") {
                     
                     let slugParaActivar = subData.external_reference;
-
+ 
                     if (!slugParaActivar && subData.back_url) {
                         const urlParams = new URLSearchParams(subData.back_url.split('?')[1]);
                         slugParaActivar = urlParams.get('u');
@@ -340,13 +339,13 @@ app.post("/webhook", async (req, res) => {
                         console.error("❌ Error: No se pudo obtener el slug del negocio.");
                         return res.sendStatus(200); 
                     }
-
+ 
                     console.log(`🚀 Activando Plan Premium para el slug: ${slugParaActivar}`);
-
+ 
                     const vencimiento = new Date();
                     vencimiento.setMonth(vencimiento.getMonth() + 1);
                     vencimiento.setDate(vencimiento.getDate() + 2);
-
+ 
                     const { data, error: updateError } = await supabase
                         .from('usuarios')
                         .update({
@@ -356,14 +355,14 @@ app.post("/webhook", async (req, res) => {
                         })
                         .eq('slug', slugParaActivar)
                         .select();
-
+ 
                     if (updateError) {
                         console.error("❌ Error al activar premium en Supabase:", updateError.message);
                     } else if (data && data.length > 0) {
                         console.log(`✨ ¡CUENTA ACTIVADA! El negocio ${data[0].business_name} ya es Premium.`);
                         delete globalCache[slugParaActivar];
                     }
-
+ 
                     const rawEmail = subData.payer_email || (subData.payer && subData.payer.email);
                     if (rawEmail && typeof registrosTemporales !== 'undefined') {
                         delete registrosTemporales[rawEmail.toLowerCase().trim()];
@@ -371,9 +370,9 @@ app.post("/webhook", async (req, res) => {
                 }
             }
         }
-
+ 
         res.sendStatus(200);
-
+ 
     } catch (e) {
         console.error("🔥 Error crítico en el Webhook:", e.message);
         res.sendStatus(200);
