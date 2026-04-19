@@ -2,9 +2,9 @@ import { MercadoPagoConfig, Preference } from "mercadopago";
 
 export async function createPreference(req, res) {
     try {
-        const { nombre, telefono, fecha, hora, slug } = req.body;
+        // ✅ FIX: se agrega email a la desestructuración del body
+        const { nombre, telefono, email, fecha, hora, slug } = req.body;
 
-        // 🔥 TRAER CONFIG REAL DEL USUARIO
         const { data: user } = await supabase
             .from("usuarios")
             .select("*")
@@ -17,15 +17,12 @@ export async function createPreference(req, res) {
 
         const metodo = user.metodo_pago;
         const tieneMP = !!user.mp_access_token;
-
         const debePagar = tieneMP && (metodo === "sena" || metodo === "total");
 
-        // 🟢 SI NO PAGA → RESPUESTA DIRECTA
         if (!debePagar) {
             return res.json({ isFree: true });
         }
 
-        // 🔥 CREAR PREFERENCE SIEMPRE QUE DEBE PAGAR
         const client = new MercadoPagoConfig({ 
             accessToken: process.env.MP_ACCESS_TOKEN 
         });
@@ -45,6 +42,7 @@ export async function createPreference(req, res) {
                 metadata: {
                     nombre,
                     telefono,
+                    email,    // ✅ FIX: email viaja con el pago para recuperarlo en el webhook
                     fecha,
                     hora,
                     slug
