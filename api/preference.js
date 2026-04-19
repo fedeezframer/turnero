@@ -48,9 +48,9 @@ export async function createPreference(req, res) {
                     slug
                 },
                 back_urls: {
-                    success: "https://dreamwebtesttemplate.framer.website/success",
-                    failure: "https://dreamwebtesttemplate.framer.website/error",
-                    pending: "https://dreamwebtesttemplate.framer.website/error"
+                    success: "https://negosocio.framer.website/success",
+                    failure: "https://negosocio.framer.website/error",
+                    pending: "https://negosocio.framer.website/error"
                 },
                 auto_return: "approved",
             },
