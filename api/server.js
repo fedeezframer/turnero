@@ -228,17 +228,37 @@ app.post("/webhook", async (req, res) => {
             const paymentId = query.id || body.data?.id;
             
             if (paymentId) {
+                // Primera consulta con token global para obtener el slug del metadata
                 const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const paymentData = await paymentResponse.json();
 
-                console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
+                console.log("🔍 METADATA PRIMERA CONSULTA:", JSON.stringify(paymentData.metadata));
  
                 if (paymentData.status === "approved" && paymentData.metadata && paymentData.metadata.slug) {
-                    const { nombre, telefono, email, fecha, hora, slug: rawSlug } = paymentData.metadata;
-                    
+                    const rawSlug = paymentData.metadata.slug;
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+                    // ✅ Buscamos el token real del negocio en Supabase
+                    const { data: userNegocio } = await supabase
+                        .from('usuarios')
+                        .select('mp_access_token')
+                        .eq('slug', slug)
+                        .single();
+
+                    // ✅ Re-consultamos el pago con el token correcto del negocio
+                    let metadataFinal = paymentData.metadata;
+                    if (userNegocio && userNegocio.mp_access_token) {
+                        const paymentResponseReal = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                            headers: { Authorization: `Bearer ${userNegocio.mp_access_token}` }
+                        });
+                        const paymentDataReal = await paymentResponseReal.json();
+                        console.log("🔍 METADATA CON TOKEN DEL NEGOCIO:", JSON.stringify(paymentDataReal.metadata));
+                        metadataFinal = paymentDataReal.metadata;
+                    }
+
+                    const { nombre, telefono, email, fecha, hora } = metadataFinal;
                     
                     const partes = fecha.split("-");
                     const textoTurnoNuevo = `${partes[2]}/${partes[1]} - ${hora}`;
