@@ -230,7 +230,10 @@ app.get("/oauth-callback", async (req, res) => {
 
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
- 
+
+const paymentData = await paymentResponse.json();
+console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
+    
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
  
