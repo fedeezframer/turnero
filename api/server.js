@@ -230,9 +230,6 @@ app.get("/oauth-callback", async (req, res) => {
 
 app.post("/webhook", async (req, res) => {
     const { query, body } = req;
-
-const paymentData = await paymentResponse.json();
-console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
     
     try {
         console.log(`📩 Webhook recibido. Tipo: ${body.type || query.topic}`);
@@ -246,9 +243,10 @@ console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
                     headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
                 });
                 const paymentData = await paymentResponse.json();
+
+                console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
  
                 if (paymentData.status === "approved" && paymentData.metadata && paymentData.metadata.slug) {
-                    // ✅ FIX: se agrega email a la desestructuración del metadata
                     const { nombre, telefono, email, fecha, hora, slug: rawSlug } = paymentData.metadata;
                     
                     const slug = rawSlug.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -259,7 +257,6 @@ console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
  
                     const sheets = await getSheets();
                     
-                    // ✅ FIX: se extiende rango a A:G y se agrega email en columna G
                     await sheets.spreadsheets.values.append({
                         spreadsheetId: MASTER_SHEET_ID,
                         range: "A:G",
@@ -272,7 +269,7 @@ console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
                                 fechaHoyReal,
                                 slug,
                                 "PENDIENTE",
-                                email ? email.trim() : ""  // ✅ columna G
+                                email ? email.trim() : ""
                             ]] 
                         }
                     });
@@ -293,7 +290,7 @@ console.log("🔍 METADATA COMPLETO:", JSON.stringify(paymentData.metadata));
                                     nombreCliente: nombre ? nombre.trim() : "Cliente",
                                     fechaHora: textoTurnoNuevo,
                                     adminEmail: userAdmin.email,
-                                    emailCliente: email ? email.trim() : ""  // ✅ FIX: email de confirmación al cliente
+                                    emailCliente: email ? email.trim() : ""
                                 })
                             });
                             console.log(`📧 Notificación enviada al admin: ${userAdmin.email}`);
