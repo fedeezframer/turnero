@@ -89,17 +89,14 @@ app.post("/api/create-preference", async (req, res) => {
     try {
         const { nombre, telefono, email, fecha, hora, slug } = req.body;
         const cleanSlug = getCleanSlug(slug);
-
         const { data: user, error: userError } = await supabase
             .from('usuarios')
             .select('*')
             .eq('slug', cleanSlug)
             .single();
-
         if (userError || !user) {
             return res.status(404).json({ error: "Negocio no encontrado." });
         }
-
         // --- BLOQUEO POR VENCIMIENTO PREMIUM ---
         if (user.plan === 'premium') {
             const ahora = new Date();
@@ -111,10 +108,8 @@ app.post("/api/create-preference", async (req, res) => {
                 });
             }
         }
-
         let precioReal = 0;
         let conceptoPago = "Total";
-
         if (user.metodo_pago === 'sena') {
             precioReal = Number(user.monto_sena) || 0;
             conceptoPago = "Seña";
@@ -122,16 +117,12 @@ app.post("/api/create-preference", async (req, res) => {
             precioReal = Number(user.precio) || 0;
             conceptoPago = "Total";
         }
-
         if (precioReal <= 0) return res.json({ isFree: true });
-
         if (!user.mp_access_token) {
             return res.status(400).json({ error: "Este negocio no configuró Mercado Pago." });
         }
-
         const clientMP = new MercadoPagoConfig({ accessToken: user.mp_access_token });
         const preference = new Preference(clientMP);
-
         const response = await preference.create({
             body: {
                 items: [{
@@ -140,15 +131,15 @@ app.post("/api/create-preference", async (req, res) => {
                     quantity: 1,
                     currency_id: "ARS"
                 }],
-            metadata: { 
-                    nombre: name, 
-                    telefono: phone,
-                    email: email || "", 
-                    fecha: fecha, 
-                    hora: hora, 
+                metadata: { 
+                    nombre: nombre,
+                    telefono: telefono,
+                    email: email || "",
+                    fecha: fecha,
+                    hora: hora,
                     slug: cleanSlug,
                     tipo_pago: user.metodo_pago || 'total'
-                    },
+                },
                 notification_url: "https://framerturnero.onrender.com/webhook",
                 back_urls: { 
                     success: "https://negosocio.framer.website/success",
@@ -158,9 +149,7 @@ app.post("/api/create-preference", async (req, res) => {
                 auto_return: "approved"
             },
         });
-
         res.json({ payment_url: response.init_point });
-
     } catch (error) {
         console.error("Error en create-preference:", error.message);
         res.status(500).json({ error: error.message });
