@@ -1161,7 +1161,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
             }
         }
 
-        // 5. Obtener turnos desde Google Sheets
         const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({ 
             spreadsheetId: MASTER_SHEET_ID, 
@@ -1229,6 +1228,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
                 })),
                 businessName: user.business_name,
                 tokens: user.tokens,
+                last_token_refresh: user.last_token_refresh || null,
                 horarios: user.horarios,
                 config: { 
                     duracion: user.duracion_turno, 
