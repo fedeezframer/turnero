@@ -1383,7 +1383,7 @@ app.get("/verify-session", async (req, res) => {
                     return res.status(402).json({ 
                         active: false, 
                         reason: "expired",
-                        redirect: "/renovar",
+                        redirect: `/renovar?u=${slug}`,
                         expiry: user.subscription_expiry 
                     });
                 }
@@ -1396,7 +1396,7 @@ app.get("/verify-session", async (req, res) => {
                 return res.status(402).json({
                     active: false,
                     reason: "no_tokens",
-                    redirect: "/freelimit",
+                    redirect: `/freelimit?u=${slug}`,
                     tokens: user.tokens
                 });
             }
