@@ -1316,10 +1316,10 @@ app.post("/cancel-appointment", async (req, res) => {
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.get("/verify-session", async (req, res) => {
     try {
         const rawU = req.query.u;
-        // Capturamos el Magic Token que viene en la URL como 'at'
         const magicToken = req.query.at; 
 
         if (!rawU) {
@@ -1327,20 +1327,16 @@ app.get("/verify-session", async (req, res) => {
             return res.json({ active: false, reason: "no_slug" });
         }
 
-        // 1. Limpieza del slug (Identificador Único)
         const slug = rawU.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
         
         console.log(`🔍 Verificando sesión para el slug: [${slug}]`);
 
-        // 2. Consultamos la base de datos buscando al usuario por su slug
-        // Traemos plan, vencimiento, tokens y el magic token guardado
         const { data: user, error } = await supabase
             .from('usuarios')
             .select('slug, plan, subscription_expiry, access_token, tokens, business_name')
             .eq('slug', slug)
             .single();
 
-        // Si el usuario no existe en la base de datos
         if (error || !user) {
             console.log(`❌ Usuario no encontrado en DB: ${slug}`);
             return res.json({ 
@@ -1350,19 +1346,14 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- 3. LÓGICA DE MAGIC LOGIN (Entrada Directa Post-Pago/Registro) ---
-        // Si el usuario trae el token correcto, le damos paso libre inmediato
         if (magicToken && user.access_token === magicToken) {
             console.log(`✨ Magic Login detectado para: ${slug}.`);
             
-            // Seguridad: Borramos el token para que el link no sea reutilizable infinitamente
             await supabase
                 .from('usuarios')
                 .update({ access_token: null })
                 .eq('slug', slug);
             
-            // Si el plan figura como 'pendiente', visualmente le mostramos 'premium'
-            // ya que si tiene el magicToken es porque acaba de completar el flujo de pago
             const planFinal = user.plan === 'pendiente' ? 'premium' : user.plan;
 
             return res.json({ 
@@ -1374,8 +1365,6 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- 4. LÓGICA DE BLOQUEO POR ESTADO 'PENDIENTE' ---
-        // Si no hay magic token y el Webhook aún no impactó, lo frenamos amablemente
         if (user.plan === 'pendiente') {
             console.log(`⏳ El usuario ${slug} está en espera de confirmación de pago.`);
             return res.status(402).json({
@@ -1385,38 +1374,34 @@ app.get("/verify-session", async (req, res) => {
             });
         }
 
-        // --- 5. LÓGICA DE BLOQUEO POR VENCIMIENTO O TOKENS ---
-
-        // CASO A: Usuario Premium con suscripción vencida
         if (user.plan === 'premium') {
             if (user.subscription_expiry) {
                 const ahora = new Date();
                 const vencimiento = new Date(user.subscription_expiry);
-
                 if (ahora > vencimiento) {
-                    console.log(`🚫 Suscripción vencida para ${slug}.`);
+                    console.log(`🚫 Suscripción vencida para ${slug}. Redirigiendo a /renovar.`);
                     return res.status(402).json({ 
                         active: false, 
                         reason: "expired",
+                        redirect: "/renovar",
                         expiry: user.subscription_expiry 
                     });
                 }
             }
         }
 
-        // CASO B: Usuario Gratis sin tokens disponibles
         if (user.plan === 'gratis') {
             if (user.tokens === null || user.tokens <= 0) {
-                console.log(`🚫 Sin tokens para: ${slug}`);
+                console.log(`🚫 Sin tokens para: ${slug}. Redirigiendo a /freelimit.`);
                 return res.status(402).json({
                     active: false,
                     reason: "no_tokens",
+                    redirect: "/freelimit",
                     tokens: user.tokens
                 });
             }
         }
 
-        // --- 6. ACCESO CONCEDIDO (Sesión Normal) ---
         console.log(`✅ Sesión confirmada: ${slug} (Plan: ${user.plan})`);
         res.json({ 
             active: true, 
