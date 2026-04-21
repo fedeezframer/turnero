@@ -1331,7 +1331,7 @@ app.get("/verify-session", async (req, res) => {
 
         const { data: user, error } = await supabase
             .from('usuarios')
-            .select('slug, plan, subscription_expiry, access_token, tokens, business_name')
+            .select('slug, plan, subscription_expiry, access_token, tokens, business_name, email')
             .eq('slug', slug)
             .single();
 
@@ -1359,6 +1359,7 @@ app.get("/verify-session", async (req, res) => {
                 slug: user.slug, 
                 plan: planFinal,
                 business_name: user.business_name,
+                email: user.email,
                 magicLogin: true 
             });
         }
@@ -1406,7 +1407,8 @@ app.get("/verify-session", async (req, res) => {
             slug: user.slug, 
             plan: user.plan,
             tokens: user.tokens,
-            business_name: user.business_name
+            business_name: user.business_name,
+            email: user.email
         });
 
     } catch (e) { 
