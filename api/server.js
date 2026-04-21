@@ -755,26 +755,25 @@ app.post("/create-booking", async (req, res) => {
         const sheets = await getSheets();
  
         // --- ✅ VALIDACIÓN ANTI-DUPLICADO ---
-        // Lee todas las filas del sheet y verifica si ya existe un turno
-        // para este cliente (mismo nombre + mismo teléfono) bajo este slug.
-        // Si existe, devuelve 400 → el frontend redirige al /alert automáticamente.
+        // Bloquea si ya existe un turno con el mismo teléfono O el mismo email
+        // bajo el mismo slug. El nombre se ignora porque pueden haber homónimos.
         const existingData = await sheets.spreadsheets.values.get({
             spreadsheetId: MASTER_SHEET_ID,
-            range: "A:E"
+            range: "A:G"
         });
  
         const existingRows = existingData.data.values || [];
  
         const yaExiste = existingRows.some(row => {
-            const nombreFila = row[0]?.toString().toLowerCase().trim();
-            const phoneFila  = row[1]?.toString().trim();
-            const slugFila   = row[4]?.toString().toLowerCase().trim();
- 
-            return (
-                nombreFila === name.trim().toLowerCase() &&
-                phoneFila  === phone.toString().trim() &&
-                slugFila   === slug
-            );
+            const phoneFila = row[1]?.toString().trim()
+            const slugFila  = row[4]?.toString().toLowerCase().trim()
+            const emailFila = row[6]?.toString().toLowerCase().trim()
+
+            const mismoSlug     = slugFila === slug
+            const mismoTelefono = phoneFila === phone.toString().trim()
+            const mismoEmail    = email && emailFila && emailFila === email.trim().toLowerCase()
+
+            return mismoSlug && (mismoTelefono || mismoEmail)
         });
  
         if (yaExiste) {
@@ -834,7 +833,6 @@ app.post("/create-booking", async (req, res) => {
     }
 });
  
-
 // --- REGISTRO Y AUTH ---
 app.post("/api/request-verification", async (req, res) => {
     try {
