@@ -1146,7 +1146,6 @@ app.get("/admin-stats/:slug", async (req, res) => {
         
         if (user.plan === 'premium') {
             const vencimiento = user.subscription_expiry ? new Date(user.subscription_expiry) : null;
-            
             const hasActiveMagicToken = user.access_token !== null;
 
             if (!hasActiveMagicToken) {
@@ -1168,16 +1167,15 @@ app.get("/admin-stats/:slug", async (req, res) => {
         });
         
         const allRows = response.data.values || [];
-
         const rows = allRows.filter((r, i) => i === 0 || (r[4] && getCleanSlug(r[4]) === slug));
 
         const mesActual = ahoraArg.getMonth() + 1;
         const diaHoyNum = ahoraArg.getDate();
+        const anioActual = ahoraArg.getFullYear();
         
         let turnosHoy = 0;
         let turnosMesActual = 0;
         let turnosLista = [];
-
         let semanas = { "Sem 1": 0, "Sem 2": 0, "Sem 3": 0, "Sem 4": 0 };
 
         rows.forEach((r, i) => {
@@ -1195,7 +1193,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
             if (mes === mesActual) {
                 turnosMesActual++;
-                
+
                 if (dia === diaHoyNum) {
                     turnosHoy++;
                 }
@@ -1207,7 +1205,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
             turnosLista.push({ 
                 nombre: r[0], 
                 telefono: r[1], 
-                fecha: `2026-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
+                fecha: `${anioActual}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`, 
                 hora: partes[1], 
                 semanaIdx: semanaIdx,
                 duracion: user.duracion_turno || 60,
@@ -1253,7 +1251,7 @@ app.get("/admin-stats/:slug", async (req, res) => {
 
     } catch (e) { 
         console.error("❌ Error crítico en admin-stats:", e.message);
-        res.status(500).json({ error: "Error al procesar las estadísticas del negocio." }); 
+        res.status(500).json({ error: "Error al procesar las estadísticas del negeso." }); 
     }
 });
 
