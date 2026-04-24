@@ -549,7 +549,7 @@ app.post("/api/create-subscription", async (req, res) => {
                 auto_recurring: {
                     frequency: 1,
                     frequency_type: "months",
-                    transaction_amount: 15, // Ajustar al valor real en pesos argentinos
+                    transaction_amount: 18000, // Ajustar al valor real en pesos argentinos
                     currency_id: "ARS"
                 },
                 // La back_url redirige al Dashboard de Framer con los parámetros de sesión
