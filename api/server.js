@@ -764,17 +764,31 @@ app.post("/create-booking", async (req, res) => {
  
         const existingRows = existingData.data.values || [];
  
-        const yaExiste = existingRows.some(row => {
-            const phoneFila = row[1]?.toString().trim()
-            const slugFila  = row[4]?.toString().toLowerCase().trim()
-            const emailFila = row[6]?.toString().toLowerCase().trim()
+const yaExiste = existingRows.some(row => {
+    const phoneFila = row[1]?.toString().trim()
+    const slugFila  = row[4]?.toString().toLowerCase().trim()
+    const emailFila = row[6]?.toString().toLowerCase().trim()
+    const turnoFila = row[2]?.toString().trim() // "22/04 - 10:00"
 
-            const mismoSlug     = slugFila === slug
-            const mismoTelefono = phoneFila === phone.toString().trim()
-            const mismoEmail    = email && emailFila && emailFila === email.trim().toLowerCase()
+    const mismoSlug     = slugFila === slug
+    const mismoTelefono = phoneFila === phone.toString().trim()
+    const mismoEmail    = email && emailFila && emailFila === email.trim().toLowerCase()
 
-            return mismoSlug && (mismoTelefono || mismoEmail)
-        });
+    if (!mismoSlug || (!mismoTelefono && !mismoEmail)) return false
+
+    // Parseamos la fecha del turno para ver si ya pasó
+    if (!turnoFila || !turnoFila.includes("/")) return false
+    const partes = turnoFila.split(" - ")
+    if (partes.length < 2) return false
+    const [dia, mes] = partes[0].split("/").map(Number)
+    const [hora, minuto] = partes[1].split(":").map(Number)
+    const anioActual = new Date().getFullYear()
+    const fechaTurno = new Date(anioActual, mes - 1, dia, hora, minuto)
+    const ahora = new Date()
+
+    // Solo bloquea si el turno todavía no ocurrió
+    return fechaTurno > ahora
+})
  
         if (yaExiste) {
             return res.status(400).json({
