@@ -846,7 +846,278 @@ const yaExiste = existingRows.some(row => {
         res.status(500).json({ error: e.message });
     }
 });
- 
+
+// ==========================================================
+// --- SERVICIOS ---
+// ==========================================================
+
+// GET /servicios/:slug — obtener todos los servicios de un negocio
+app.get("/servicios/:slug", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.params.slug);
+
+        const { data: servicios, error } = await supabase
+            .from("servicios")
+            .select("*")
+            .eq("slug", slug)
+            .eq("activo", true)
+            .order("created_at", { ascending: true });
+
+        if (error) throw error;
+
+        res.json({ success: true, servicios: servicios || [] });
+    } catch (e) {
+        console.error("Error en GET /servicios:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /servicios/admin/:slug — obtener TODOS los servicios (activos e inactivos) para el panel
+app.get("/servicios/admin/:slug", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.params.slug);
+
+        const { data: servicios, error } = await supabase
+            .from("servicios")
+            .select("*")
+            .eq("slug", slug)
+            .order("created_at", { ascending: true });
+
+        if (error) throw error;
+
+        res.json({ success: true, servicios: servicios || [] });
+    } catch (e) {
+        console.error("Error en GET /servicios/admin:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /servicios/crear — crear un nuevo servicio
+app.post("/servicios/crear", async (req, res) => {
+    try {
+        const { slug, nombre, descripcion, duracion, precio, capacidad } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        if (!cleanSlug || !nombre || !duracion || precio === undefined) {
+            return res.status(400).json({ error: "Faltan campos obligatorios: slug, nombre, duracion, precio." });
+        }
+
+        const { data, error } = await supabase
+            .from("servicios")
+            .insert([{
+                slug: cleanSlug,
+                nombre: nombre.trim(),
+                descripcion: descripcion ? descripcion.trim() : "",
+                duracion: parseInt(duracion),
+                precio: Number(precio),
+                capacidad: parseInt(capacidad) || 1,
+                activo: true
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        delete globalCache[cleanSlug];
+        res.json({ success: true, servicio: data });
+    } catch (e) {
+        console.error("Error en POST /servicios/crear:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /servicios/editar — editar un servicio existente
+app.post("/servicios/editar", async (req, res) => {
+    try {
+        const { id, slug, nombre, descripcion, duracion, precio, capacidad, activo } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        if (!id) {
+            return res.status(400).json({ error: "Falta el id del servicio." });
+        }
+
+        const updateData = {};
+        if (nombre !== undefined) updateData.nombre = nombre.trim();
+        if (descripcion !== undefined) updateData.descripcion = descripcion.trim();
+        if (duracion !== undefined) updateData.duracion = parseInt(duracion);
+        if (precio !== undefined) updateData.precio = Number(precio);
+        if (capacidad !== undefined) updateData.capacidad = parseInt(capacidad);
+        if (activo !== undefined) updateData.activo = activo;
+
+        const { data, error } = await supabase
+            .from("servicios")
+            .update(updateData)
+            .eq("id", id)
+            .eq("slug", cleanSlug)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        delete globalCache[cleanSlug];
+        res.json({ success: true, servicio: data });
+    } catch (e) {
+        console.error("Error en POST /servicios/editar:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /servicios/eliminar — eliminar un servicio
+app.post("/servicios/eliminar", async (req, res) => {
+    try {
+        const { id, slug } = req.body;
+        const cleanSlug = getCleanSlug(slug);
+
+        if (!id) {
+            return res.status(400).json({ error: "Falta el id del servicio." });
+        }
+
+        const { error } = await supabase
+            .from("servicios")
+            .delete()
+            .eq("id", id)
+            .eq("slug", cleanSlug);
+
+        if (error) throw error;
+
+        delete globalCache[cleanSlug];
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Error en POST /servicios/eliminar:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================================
+// --- SLOTS DISPONIBLES CON CAPACIDAD ---
+// ==========================================================
+
+// GET /slots-disponibles/:slug — devuelve los slots con cuántos lugares quedan
+app.get("/slots-disponibles/:slug", async (req, res) => {
+    try {
+        const slug = getCleanSlug(req.params.slug);
+        const { fecha, servicio_id } = req.query;
+
+        const { data: user, error: userError } = await supabase
+            .from("usuarios")
+            .select("horarios, duracion_turno, capacidad_por_turno, excepciones")
+            .eq("slug", slug)
+            .single();
+
+        if (userError || !user) {
+            return res.status(404).json({ error: "Negocio no encontrado." });
+        }
+
+        // Si viene un servicio_id usamos su duración y capacidad, si no usamos los globales
+        let duracion = user.duracion_turno || 30;
+        let capacidad = user.capacidad_por_turno || 1;
+
+        if (servicio_id) {
+            const { data: servicio } = await supabase
+                .from("servicios")
+                .select("duracion, capacidad")
+                .eq("id", servicio_id)
+                .single();
+
+            if (servicio) {
+                duracion = servicio.duracion || duracion;
+                capacidad = servicio.capacidad || capacidad;
+            }
+        }
+
+        // Verificar si la fecha es excepción
+        if (user.excepciones && user.excepciones.includes(fecha)) {
+            return res.json({ success: true, slots: [] });
+        }
+
+        // Obtener el día de la semana
+        const diasSemana = ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"];
+        const fechaObj = new Date(fecha + "T12:00:00");
+        const diaNombre = diasSemana[fechaObj.getDay()];
+        const diaConfig = user.horarios?.[diaNombre];
+
+        if (!diaConfig || !diaConfig.activo) {
+            return res.json({ success: true, slots: [] });
+        }
+
+        // Generar todos los slots del día
+        const [jornadaIni, jornadaFin] = diaConfig.jornada;
+        const [descansoIni, descansoFin] = diaConfig.descanso || [null, null];
+
+        const toMinutes = (timeStr) => {
+            if (!timeStr) return null;
+            const [h, m] = timeStr.split(":").map(Number);
+            return h * 60 + m;
+        };
+
+        const fromMinutes = (mins) => {
+            const h = Math.floor(mins / 60).toString().padStart(2, "0");
+            const m = (mins % 60).toString().padStart(2, "0");
+            return `${h}:${m}`;
+        };
+
+        const inicioJornada = toMinutes(jornadaIni);
+        const finJornada = toMinutes(jornadaFin);
+        const inicioDescanso = toMinutes(descansoIni);
+        const finDescanso = toMinutes(descansoFin);
+
+        const slotsGenerados = [];
+        let cursor = inicioJornada;
+
+        while (cursor + duracion <= finJornada) {
+            const enDescanso = inicioDescanso && finDescanso && cursor >= inicioDescanso && cursor < finDescanso;
+            if (!enDescanso) {
+                slotsGenerados.push(fromMinutes(cursor));
+            }
+            cursor += duracion;
+        }
+
+        // Leer reservas existentes del sheet para esa fecha y slug
+        const sheets = await getSheets();
+        const sheetData = await sheets.spreadsheets.values.get({
+            spreadsheetId: MASTER_SHEET_ID,
+            range: "A:G"
+        });
+
+        const allRows = sheetData.data.values || [];
+        const [anio, mes, dia] = fecha.split("-");
+        const fechaFormateada = `${dia}/${mes}`;
+
+        // Contar cuántas reservas hay por slot
+        const reservasPorSlot = {};
+        allRows.forEach((row, i) => {
+            if (i === 0) return;
+            const turnoFila = row[2]?.toString().trim();
+            const slugFila = row[4]?.toString().toLowerCase().trim();
+            if (slugFila !== slug || !turnoFila) return;
+            const partes = turnoFila.split(" - ");
+            if (partes.length < 2) return;
+            const fechaFila = partes[0].trim();
+            const horaFila = partes[1].trim();
+            if (fechaFila === fechaFormateada) {
+                reservasPorSlot[horaFila] = (reservasPorSlot[horaFila] || 0) + 1;
+            }
+        });
+
+        // Armar respuesta con lugares disponibles por slot
+        const slotsConDisponibilidad = slotsGenerados.map(slot => {
+            const reservados = reservasPorSlot[slot] || 0;
+            const disponibles = capacidad - reservados;
+            return {
+                hora: slot,
+                disponibles: Math.max(0, disponibles),
+                lleno: disponibles <= 0
+            };
+        });
+
+        res.json({ success: true, slots: slotsConDisponibilidad });
+
+    } catch (e) {
+        console.error("Error en /slots-disponibles:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- REGISTRO Y AUTH ---
 app.post("/api/request-verification", async (req, res) => {
     try {
